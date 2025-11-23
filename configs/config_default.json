@@ -1,0 +1,120 @@
+{
+  "substrate": {
+    "N": 200,
+    "C": 1.0,
+    "lam": 0.03,
+    "dt": 0.05,
+    "init_v_std": 0.01,
+    "init_g_scale": 0.001,
+    "symmetric_g": false,
+    "clip_g_min": 0.0,
+    "clip_g_max": null,
+    "dtype": "float32",
+    "seed": 0
+  },
+
+  "plasticity": {
+    "eta": 0.002,
+    "alpha": 0.02,
+    "dt": 0.05,
+
+    "use_fitness_gate": true,
+    "fitness_floor": null,
+    "fitness_ceil": null,
+
+    "symmetric_g": false,
+    "clip_g_min": 0.0,
+    "clip_g_max": null,
+
+    "enable_create_prune": false,
+    "prune_threshold": 1e-6,
+    "create_rate": 0.0,
+    "create_scale": 1e-5,
+
+    "dtype": "float32",
+    "seed": 0
+  },
+
+  "run": {
+    "total_steps": 36000,
+    "slot_period": 240,
+    "log_every": 1,
+    "record_V": true,
+    "record_dV": false,
+    "record_metrics": true,
+    "dtype": "float32"
+  },
+
+  "slot": {
+    "pulse_len": 28,
+    "relax_len": 120
+  },
+
+  "environments": {
+    "code_env": {
+      "code_string": "ABBAAABBABABBBBA",
+      "token_names": ["A", "B"],
+      "nodes_per_token": 7,
+      "period": 240,
+      "pulse_len": 28,
+      "relax_len": 120,
+      "amps": [1.0, -1.0],
+      "seed": 2
+    },
+
+    "token_env": {
+      "token_names": ["A", "B", "C"],
+      "nodes_per_token": 7,
+      "period": 300,
+      "pulse_len": 28,
+      "relax_len": 100,
+      "amps": [1.0, 0.8, 1.2],
+      "seed": 2
+    },
+
+    "regime_noise_env": {
+      "regimes": 4,
+      "nodes_per_regime": 8,
+      "period": 260,
+      "pulse_len": 35,
+      "relax_len": 110,
+      "regime_period_slots": 8,
+      "base_amp": 0.7,
+      "noise_std": 0.25,
+      "seed": 3
+    },
+
+    "closed_loop_env": {
+      "period": 260,
+      "pulse_len": 35,
+      "relax_len": 110,
+
+      "regimes": 3,
+      "nodes_per_regime": 9,
+      "base_amp": 0.8,
+      "noise_std": 0.18,
+
+      "E_init": 0.0,
+      "E_leak": 0.002,
+      "E_drive": 0.004,
+      "E_clip": 2.0,
+
+      "feedback_gain": 0.03,
+      "feedback_mode": "energy"
+    }
+  },
+
+  "analysis": {
+    "cosine_cluster": {
+      "threshold": 0.996,
+      "min_cluster_size": 1
+    },
+
+    "graph": {
+      "drop_self_loops": false,
+      "min_count": 1,
+      "normalize": true,
+      "max_out_degree_simplify": 3
+    }
+  }
+}
