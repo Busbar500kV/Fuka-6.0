@@ -65,14 +65,15 @@ g[i,j] = strength of coupling from capacitor j → i
 
 This determines how charge “flows” between units.
 
-### How Fuka-6.0 Capacitors Work
-![Fuka Capacitor Network](images/fuka_capacitor_netwo)
 
 ⸻
 
 🧩 4. What drives the capacitors?
 
 There are three forces that change capacitor voltages.
+
+### How Fuka-6.0 Capacitors Work
+![Fuka Capacitor Network](images/96FB08D3-A8E0-4225-9267-3B54A23906A5.png)
 
 ⸻
 
