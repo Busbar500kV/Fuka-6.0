@@ -47,6 +47,9 @@ These are the same ingredients used by:
 
 Capacitor networks naturally form state machines.
 
+### How Fuka-6.0 Capacitors Work
+![Fuka Capacitor Network](images/96FB08D3-A8E0-4225-9267-3B54A23906A5.png)
+
 ⸻
 
 🧩 3. The Fuka-6.0 idea: A universe of capacitors
@@ -65,6 +68,9 @@ g[i,j] = strength of coupling from capacitor j → i
 
 This determines how charge “flows” between units.
 
+### Transition Graph (Attractor Finite-State Machine)
+![Transition Graph](images/ACEA2CE6-E90C-4611-8EC3-1918D595E02F.png)
+
 
 ⸻
 
@@ -72,8 +78,6 @@ This determines how charge “flows” between units.
 
 There are three forces that change capacitor voltages.
 
-### How Fuka-6.0 Capacitors Work
-![Fuka Capacitor Network](images/96FB08D3-A8E0-4225-9267-3B54A23906A5.png)
 
 ⸻
 
@@ -200,8 +204,6 @@ This is the clean unification:
 
 Capacitors → attractors → symbols → code → hardware → adaptation
 
-### Transition Graph (Attractor Finite-State Machine)
-![Transition Graph](images/transition_graph.png)
 
 ⸻
 
