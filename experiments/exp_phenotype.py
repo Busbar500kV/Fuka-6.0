@@ -254,12 +254,12 @@ def main():
         base_amp=0.8,
         noise_std=0.18,
         E_init=0.0,
-        E_leak=0.008,            # Phase-6.1
+        E_leak=0.0095,            # Phase-6.1
         E_drive=0.004,
         E_clip=2.0,
         feedback_gain=0.006,     # Phase-6.1
         feedback_mode="energy",
-        E_scale_factor=0.35,     # Phase-6.1
+        E_scale_factor=0.30,     # Phase-6.1
     )
 
     slot_cfg = SlotConfig(pulse_len=env_cfg.pulse_len, relax_len=env_cfg.relax_len)
