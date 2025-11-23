@@ -75,7 +75,7 @@ class ClosedLoopEnvConfig:
 
     # scalar environment dynamics
     E_init: float = 0.0
-    E_leak: float = 0.008           # Phase-6.1: stronger pull to baseline
+    E_leak: float = 0.0095           # Phase-6.1: stronger pull to baseline
     E_drive: float = 0.004
     E_clip: float = 2.0
 
@@ -84,7 +84,7 @@ class ClosedLoopEnvConfig:
     feedback_mode: str = "energy"   # "energy" or "sign"
 
     # moderated scaling
-    E_scale_factor: float = 0.35    # Phase-6.1: gentler excitation scaling
+    E_scale_factor: float = 0.30    # Phase-6.1: gentler excitation scaling
 
 
 class ClosedLoopEnvironment:
