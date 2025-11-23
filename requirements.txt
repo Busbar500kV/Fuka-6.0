@@ -1,0 +1,12 @@
+# Core numerical stack
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Plotting
+matplotlib>=3.7.0
+
+# Optional: for interactive debugging, safe to remove
+ipython>=8.0
+
+# No torch / jax / tensorflow.
+# Fuka-6.0 is intentionally pure NumPy.
