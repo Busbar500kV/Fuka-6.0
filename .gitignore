@@ -1,0 +1,36 @@
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.env/
+.venv/
+*.venv/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# NPZ / NPY experiment outputs
+runs/
+**/runs/
+*.npz
+*.npy
+
+# Local configs / secrets
+config_local.json
+
+# Jupyter / Colab checkpoints
+.ipynb_checkpoints/
+*.ipynb
