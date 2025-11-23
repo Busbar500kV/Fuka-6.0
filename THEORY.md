@@ -8,8 +8,6 @@ This section explains, in simple language, how real capacitors behave and how th
 
 A capacitor is the simplest device that can store and change electrical state.
 
-### How a Real Capacitor Works
-![Capacitor Physics Explained](images/capacitor_physics_explained.png)
 
 It holds energy by separating charge.
 Three important facts:
