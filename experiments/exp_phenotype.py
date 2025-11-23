@@ -319,7 +319,7 @@ def main():
     # -------------------------
     # Cluster unsupervised alphabet
     # -------------------------
-    cl_cfg = CosineClusterConfig(threshold=0.990)
+    cl_cfg = CosineClusterConfig(threshold=0.985)
     cluster_ids, reps, sizes = cluster_cosine_incremental(samples, cl_cfg)
 
     labels_map = build_unsupervised_labels(cluster_ids, prefix="T")
