@@ -266,7 +266,7 @@ def main():
     env = ClosedLoopEnvironment(substrate_cfg.N, env_cfg, seed=5)
 
     run_cfg = RunConfig(
-        total_steps=52000,
+        total_steps=180000,
         slot_period=env_cfg.period,
         record_V=True,
         record_dV=False,
