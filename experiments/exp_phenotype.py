@@ -1,23 +1,31 @@
 """
-Fuka-6.0 Experiment: Phase 6 (FIXED)
-Phenotype emergence via closed-loop environment
+Fuka-6.0 Experiment: Phase 6.1
+Phenotype emergence via closed-loop environment (homeostasis refinement)
 
 Goal:
-    Establish the minimal closed evolutionary loop:
+    Strengthen homeostasis so closed-loop environment does not overdrive
+    the substrate, allowing stable attractor basins to recur.
 
-        substrate <-> code/attractors <-> environment
+Phase-6 FIXED outcome:
+    - E(t) no longer saturated, but final E still high (~1.6)
+    - Many singleton attractors remained
+    - Several multi-sample clusters appeared (good sign)
 
-Fix rationale:
-    Previous Phase-6 showed "runaway positive feedback":
-        - Environment scalar E(t) saturated at +E_clip
-        - Attractors never stabilized
-        - Almost every sample formed a singleton cluster
+Phase-6.1 refinements:
+    1) Reduce feedback_gain slightly: 0.008 -> 0.006
+       (weaker substrate -> env push)
 
-    Fixes applied:
-        A) Reduce feedback_gain (weaker substrate -> env push)
-        B) Increase E_leak (stronger env homeostasis)
-        C) Soften regime scaling by E (limit excitation blow-up)
-        D) Slightly relax clustering threshold for unsupervised basins
+    2) Increase E_leak slightly: 0.006 -> 0.008
+       (stronger env decay toward baseline)
+
+    3) Reduce regime scaling by E: 0.5 -> 0.35
+       (limits excitation amplification)
+
+Expected behavior:
+    - E(t) settles in ~0.4–0.9 band or oscillates gently
+    - clusters_found drops further
+    - more non-singleton basins
+    - clearer phenotype stabilization
 
 Run:
     python -m experiments.exp_phenotype
@@ -50,7 +58,7 @@ from analysis.plots import (
 )
 
 # ---------------------------------------------------------------------
-# Closed-loop environment (with homeostasis)
+# Closed-loop environment (homeostasis refined)
 # ---------------------------------------------------------------------
 
 @dataclass
@@ -67,16 +75,16 @@ class ClosedLoopEnvConfig:
 
     # scalar environment dynamics
     E_init: float = 0.0
-    E_leak: float = 0.006          # FIX B: stronger pull to baseline
+    E_leak: float = 0.008           # Phase-6.1: stronger pull to baseline
     E_drive: float = 0.004
     E_clip: float = 2.0
 
     # substrate -> environment coupling
-    feedback_gain: float = 0.008    # FIX A: weaker positive feedback
+    feedback_gain: float = 0.006    # Phase-6.1: weaker positive feedback
     feedback_mode: str = "energy"   # "energy" or "sign"
 
-    # FIX C: soften scaling (avoid 3x blow-up when E saturates)
-    E_scale_factor: float = 0.5     # injection scales as (1 + E_scale_factor*E)
+    # moderated scaling
+    E_scale_factor: float = 0.35    # Phase-6.1: gentler excitation scaling
 
 
 class ClosedLoopEnvironment:
@@ -86,7 +94,7 @@ class ClosedLoopEnvironment:
       - scalar E(t) modulating injection amplitude
       - E(t) updated by substrate readout
 
-    Includes homeostasis fixes.
+    Includes refined homeostasis.
     """
 
     def __init__(self, N: int, cfg: ClosedLoopEnvConfig, seed: int = 4):
@@ -135,7 +143,7 @@ class ClosedLoopEnvironment:
 
             dE = -E_leak*E + E_drive + feedback_gain*tanh(readout)
 
-        Stronger leak + weaker gain => homeostasis.
+        Higher leak + lower gain => tighter homeostasis.
         """
         phi = np.tanh(readout)
 
@@ -171,7 +179,7 @@ class ClosedLoopEnvironment:
         within = t % self.cfg.period
         I = np.zeros(self.N, dtype=substrate.cfg.dtype)
 
-        # FIX C: moderated scaling (1 + kE)
+        # moderated scaling (Phase-6.1)
         scale = 1.0 + self.cfg.E_scale_factor * self.E
 
         if within < self.cfg.pulse_len:
@@ -246,12 +254,12 @@ def main():
         base_amp=0.8,
         noise_std=0.18,
         E_init=0.0,
-        E_leak=0.006,            # FIX B
+        E_leak=0.008,            # Phase-6.1
         E_drive=0.004,
         E_clip=2.0,
-        feedback_gain=0.008,     # FIX A
+        feedback_gain=0.006,     # Phase-6.1
         feedback_mode="energy",
-        E_scale_factor=0.5,      # FIX C
+        E_scale_factor=0.35,     # Phase-6.1
     )
 
     slot_cfg = SlotConfig(pulse_len=env_cfg.pulse_len, relax_len=env_cfg.relax_len)
@@ -311,15 +319,14 @@ def main():
     # -------------------------
     # Cluster unsupervised alphabet
     # -------------------------
-    # FIX D: a bit more tolerant than 0.995
     cl_cfg = CosineClusterConfig(threshold=0.990)
     cluster_ids, reps, sizes = cluster_cosine_incremental(samples, cl_cfg)
 
     labels_map = build_unsupervised_labels(cluster_ids, prefix="T")
     decoded = decode_sequence(cluster_ids, labels_map)
 
-    print("\nPhase 6 results (Phenotype loop, FIXED)")
-    print("---------------------------------------")
+    print("\nPhase 6 results (Phenotype loop, Phase-6.1)")
+    print("-------------------------------------------")
     print(f"samples: {len(samples)}")
     print(f"clusters_found: {len(reps)}")
     print(f"cluster_sizes: {sizes}")
@@ -329,14 +336,14 @@ def main():
     # -------------------------
     # Plots
     # -------------------------
-    plot_fitness(fitness_hist, title="Fitness F(t) — closed-loop env (fixed)", x_max=9000)
-    plot_environment(E_hist, title="Environment scalar E(t) (fixed)")
-    plot_readout(readout_hist, title="Substrate readout driving E(t) (fixed)")
+    plot_fitness(fitness_hist, title="Fitness F(t) — closed-loop env (Phase-6.1)", x_max=9000)
+    plot_environment(E_hist, title="Environment scalar E(t) (Phase-6.1)")
+    plot_readout(readout_hist, title="Substrate readout driving E(t) (Phase-6.1)")
 
     plot_cluster_ids_per_slot(
         slot_ids=(sample_times // period),
         cluster_ids=cluster_ids,
-        title="Emergent attractor clusters per slot (closed-loop, fixed)"
+        title="Emergent attractor clusters per slot (closed-loop, Phase-6.1)"
     )
 
     plot_pca_samples(
