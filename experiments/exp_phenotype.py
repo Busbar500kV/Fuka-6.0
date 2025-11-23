@@ -1,5 +1,5 @@
 """
-Fuka-6.0 Experiment: Phase 6
+Fuka-6.0 Experiment: Phase 6 (FIXED)
 Phenotype emergence via closed-loop environment
 
 Goal:
@@ -7,18 +7,23 @@ Goal:
 
         substrate <-> code/attractors <-> environment
 
-    The environment has a scalar state E(t) that:
-      - drives energy injection into the substrate
-      - is itself modified by the substrate's emergent state
+Fix rationale:
+    Previous Phase-6 showed "runaway positive feedback":
+        - Environment scalar E(t) saturated at +E_clip
+        - Attractors never stabilized
+        - Almost every sample formed a singleton cluster
 
-This is the first prototype of "phenotype":
-  computation that changes the environment which changes the computation.
+    Fixes applied:
+        A) Reduce feedback_gain (weaker substrate -> env push)
+        B) Increase E_leak (stronger env homeostasis)
+        C) Soften regime scaling by E (limit excitation blow-up)
+        D) Slightly relax clustering threshold for unsupervised basins
 
 Run:
     python -m experiments.exp_phenotype
 
 NPZ:
-    Saves to ./runs/exp_phenotype_<timestamp>.npz
+    Saves to ./runs/exp_phenotype_fixed_<timestamp>.npz
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Optional, List, Tuple, Dict, Any
+from typing import List
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -44,9 +49,8 @@ from analysis.plots import (
     plot_pca_samples
 )
 
-
 # ---------------------------------------------------------------------
-# Closed-loop environment
+# Closed-loop environment (with homeostasis)
 # ---------------------------------------------------------------------
 
 @dataclass
@@ -55,31 +59,34 @@ class ClosedLoopEnvConfig:
     pulse_len: int = 35
     relax_len: int = 110
 
-    regimes: int = 3                # hidden physical regimes
-    nodes_per_regime: int = 8
+    regimes: int = 3
+    nodes_per_regime: int = 9
 
     base_amp: float = 0.8
-    noise_std: float = 0.2
+    noise_std: float = 0.18
 
     # scalar environment dynamics
     E_init: float = 0.0
-    E_leak: float = 0.002           # environment tends to relax to 0
-    E_drive: float = 0.004          # external background drift (sunlight etc.)
+    E_leak: float = 0.006          # FIX B: stronger pull to baseline
+    E_drive: float = 0.004
     E_clip: float = 2.0
 
     # substrate -> environment coupling
-    feedback_gain: float = 0.03     # how strongly substrate readout pushes E
+    feedback_gain: float = 0.008    # FIX A: weaker positive feedback
     feedback_mode: str = "energy"   # "energy" or "sign"
+
+    # FIX C: soften scaling (avoid 3x blow-up when E saturates)
+    E_scale_factor: float = 0.5     # injection scales as (1 + E_scale_factor*E)
 
 
 class ClosedLoopEnvironment:
     """
     Environment with:
       - hidden regimes (spatial patterns)
-      - scalar state E(t) that modulates injection amplitude
+      - scalar E(t) modulating injection amplitude
       - E(t) updated by substrate readout
 
-    This is the minimal phenotype loop.
+    Includes homeostasis fixes.
     """
 
     def __init__(self, N: int, cfg: ClosedLoopEnvConfig, seed: int = 4):
@@ -94,10 +101,8 @@ class ClosedLoopEnvironment:
         ]
         self.regime_amp = cfg.base_amp * (1.0 + 0.25 * self.rng.standard_normal(self.R))
         self.regime_period_slots = 7
-
         self.global_freq = 2 * np.pi / (cfg.period * 6.0)
 
-        # scalar environment state
         self.E = float(cfg.E_init)
 
         # logs
@@ -112,9 +117,8 @@ class ClosedLoopEnvironment:
         """
         Minimal readout from substrate to environment.
 
-        Options:
-          - "energy": use ||V||^2 (global activation)
-          - "sign":   use mean(V) (directional bias)
+        "energy": ||V||^2 / N
+        "sign": mean(V)
         """
         V = substrate.V.astype(np.float64)
 
@@ -127,14 +131,12 @@ class ClosedLoopEnvironment:
 
     def update_environment(self, readout: float) -> None:
         """
-        Update scalar E(t) using substrate readout.
+        Update scalar E(t):
 
-        Simple dynamics:
-            dE/dt = -E_leak * E + E_drive + feedback_gain * phi(readout)
+            dE = -E_leak*E + E_drive + feedback_gain*tanh(readout)
 
-        where phi is a squashing to keep things stable.
+        Stronger leak + weaker gain => homeostasis.
         """
-        # squash to avoid runaway
         phi = np.tanh(readout)
 
         dE = (
@@ -142,25 +144,26 @@ class ClosedLoopEnvironment:
             + self.cfg.E_drive
             + self.cfg.feedback_gain * phi
         )
+
         self.E += dE
         self.E = float(np.clip(self.E, -self.cfg.E_clip, self.cfg.E_clip))
 
     def env_fn(self, t: int, substrate: Substrate) -> np.ndarray:
         """
-        Called each time step by core.run.
+        Called per timestep.
 
-        1) Read substrate state
+        1) Read substrate
         2) Update E(t)
-        3) Build I(t) using E(t)
+        3) Construct I(t) scaled by moderated E
         """
         slot = t // self.cfg.period
         r = self.regime_at_slot(slot)
 
-        # --- substrate -> environment ---
+        # substrate -> environment
         readout = self.substrate_readout(substrate)
         self.update_environment(readout)
 
-        # log env state
+        # log env
         self.E_hist.append(self.E)
         self.regime_hist.append(r)
         self.readout_hist.append(readout)
@@ -168,11 +171,12 @@ class ClosedLoopEnvironment:
         within = t % self.cfg.period
         I = np.zeros(self.N, dtype=substrate.cfg.dtype)
 
-        # regime-based pulse, scaled by E(t)
-        if within < self.cfg.pulse_len:
-            I[self.regime_nodes[r]] = self.regime_amp[r] * (1.0 + self.E)
+        # FIX C: moderated scaling (1 + kE)
+        scale = 1.0 + self.cfg.E_scale_factor * self.E
 
-        # continuous bias + noise
+        if within < self.cfg.pulse_len:
+            I[self.regime_nodes[r]] = self.regime_amp[r] * scale
+
         global_wave = np.sin(self.global_freq * t)
         I += global_wave * 0.15
         I += self.cfg.noise_std * self.rng.standard_normal(self.N)
@@ -229,7 +233,7 @@ def main():
         dt=substrate_cfg.dt,
         use_fitness_gate=True,
         symmetric_g=substrate_cfg.symmetric_g,
-        enable_create_prune=False,  # keep off for the first phenotype test
+        enable_create_prune=False,
         seed=0,
     )
 
@@ -242,11 +246,12 @@ def main():
         base_amp=0.8,
         noise_std=0.18,
         E_init=0.0,
-        E_leak=0.002,
+        E_leak=0.006,            # FIX B
         E_drive=0.004,
         E_clip=2.0,
-        feedback_gain=0.03,
+        feedback_gain=0.008,     # FIX A
         feedback_mode="energy",
+        E_scale_factor=0.5,      # FIX C
     )
 
     slot_cfg = SlotConfig(pulse_len=env_cfg.pulse_len, relax_len=env_cfg.relax_len)
@@ -269,7 +274,7 @@ def main():
         run_cfg=run_cfg,
         env_fn=env.env_fn,
         slot_cfg=slot_cfg,
-        true_token_fn=None,  # unsupervised
+        true_token_fn=None,
         seed=0,
     )
 
@@ -304,16 +309,17 @@ def main():
     regime_labels = np.array(regime_labels, dtype=np.int32)
 
     # -------------------------
-    # Cluster emergent alphabet (unsupervised)
+    # Cluster unsupervised alphabet
     # -------------------------
-    cl_cfg = CosineClusterConfig(threshold=0.995)
+    # FIX D: a bit more tolerant than 0.995
+    cl_cfg = CosineClusterConfig(threshold=0.990)
     cluster_ids, reps, sizes = cluster_cosine_incremental(samples, cl_cfg)
 
     labels_map = build_unsupervised_labels(cluster_ids, prefix="T")
     decoded = decode_sequence(cluster_ids, labels_map)
 
-    print("\nPhase 6 results (Phenotype loop)")
-    print("--------------------------------")
+    print("\nPhase 6 results (Phenotype loop, FIXED)")
+    print("---------------------------------------")
     print(f"samples: {len(samples)}")
     print(f"clusters_found: {len(reps)}")
     print(f"cluster_sizes: {sizes}")
@@ -323,14 +329,14 @@ def main():
     # -------------------------
     # Plots
     # -------------------------
-    plot_fitness(fitness_hist, title="Fitness F(t) — closed-loop env", x_max=9000)
-    plot_environment(E_hist, title="Environment scalar E(t)")
-    plot_readout(readout_hist, title="Substrate readout driving E(t)")
+    plot_fitness(fitness_hist, title="Fitness F(t) — closed-loop env (fixed)", x_max=9000)
+    plot_environment(E_hist, title="Environment scalar E(t) (fixed)")
+    plot_readout(readout_hist, title="Substrate readout driving E(t) (fixed)")
 
     plot_cluster_ids_per_slot(
         slot_ids=(sample_times // period),
         cluster_ids=cluster_ids,
-        title="Emergent attractor clusters per slot (closed-loop)"
+        title="Emergent attractor clusters per slot (closed-loop, fixed)"
     )
 
     plot_pca_samples(
@@ -344,7 +350,7 @@ def main():
     # -------------------------
     os.makedirs("runs", exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    path = f"runs/exp_phenotype_{stamp}.npz"
+    path = f"runs/exp_phenotype_fixed_{stamp}.npz"
 
     np.savez_compressed(
         path,
@@ -360,6 +366,7 @@ def main():
         E_hist=E_hist,
         regime_hist=regime_hist,
         substrate_readout_hist=readout_hist,
+        env_cfg=np.array([env_cfg.__dict__], dtype=object),
     )
 
     print(f"\nSaved: {path}\n")
