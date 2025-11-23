@@ -1,36 +1,35 @@
 """
-Fuka-6.0 Experiment: Phase 4
-Self-generated attractor alphabet from noisy environment
+Fuka-6.0 Experiment: Phase 4 (FIXED)
+Self tokens (unsupervised alphabet emergence)
 
-Goal:
-    Remove external labeled tokens (A/B/C).
-    Drive the substrate with physical, continuous input waves.
-    Show that it still self-organizes a finite attractor alphabet.
+Problem in prior Phase-4:
+    - Environment forcing was too noisy and too fast.
+    - Relaxation window was too short.
+    - Cosine threshold was too strict.
+Result: every sample looked unique -> 1 cluster per sample.
 
-Environment:
-    A small number of hidden regimes (not labeled to the substrate)
-    that switch slowly. Each regime generates noisy wave input.
-
-Outputs:
-    - fitness plot
-    - emergent cluster IDs per slot
-    - PCA projection of attractor samples colored by regime (only for us)
-    - unsupervised token chain (T0, T1, ...)
+Fix:
+    - Use smooth, slowly-switching regimes.
+    - Reduce noise strongly.
+    - Increase relax_len and slot_period.
+    - Use a more tolerant cosine clustering threshold.
 
 Run:
     python -m experiments.exp_self_tokens
 
 NPZ:
-    Saves to ./runs/exp_self_tokens_<timestamp>.npz
+    Saves to ./runs/exp_self_tokens_fixed_<timestamp>.npz
 """
 
 from __future__ import annotations
 
 import os
 import time
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import List, Tuple
 
 import numpy as np
+import matplotlib.pyplot as plt
 
 from core.substrate import SubstrateConfig, Substrate
 from core.plasticity import PlasticityConfig
@@ -47,90 +46,90 @@ from analysis.plots import (
 
 
 # ---------------------------------------------------------------------
-# Noisy regime environment
+# Smooth unsupervised environment
 # ---------------------------------------------------------------------
 
-class RegimeNoiseEnvironment:
+@dataclass
+class SmoothRegimeEnvConfig:
+    period: int = 320
+    pulse_len: int = 28
+    relax_len: int = 220
+
+    regimes: int = 4
+    nodes_per_regime: int = 9
+    regime_period_slots: int = 10   # slow switching
+
+    base_amp: float = 0.55
+    noise_std: float = 0.05         # << much lower than before
+
+    # slow, continuous background wave
+    wave_amp: float = 0.12
+    wave_period_slots: float = 24.0
+
+    seed: int = 7
+
+
+class SmoothRegimeEnvironment:
     """
-    Environment with hidden regimes.
-
-    Each regime defines:
-      - a sparse spatial pattern of driven nodes
-      - a mean amplitude
-      - additive Gaussian noise
-
-    The regime switches every 'regime_period' slots.
+    Unlabeled environment with hidden regimes that change slowly.
+    Pulses are soft and noise is low so attractors can recur.
     """
 
-    def __init__(
-        self,
-        N: int,
-        regimes: int = 4,
-        nodes_per_regime: int = 8,
-        period: int = 260,
-        pulse_len: int = 35,
-        relax_len: int = 110,
-        regime_period_slots: int = 8,
-        base_amp: float = 0.7,
-        noise_std: float = 0.25,
-        seed: int = 3,
-    ):
+    def __init__(self, N: int, cfg: SmoothRegimeEnvConfig):
         self.N = N
-        self.R = regimes
-        self.period = period
-        self.pulse_len = pulse_len
-        self.relax_len = relax_len
-        self.regime_period_slots = regime_period_slots
-        self.base_amp = base_amp
-        self.noise_std = noise_std
+        self.cfg = cfg
+        self.rng = np.random.default_rng(cfg.seed)
 
-        self.rng = np.random.default_rng(seed)
+        self.R = cfg.regimes
         self.regime_nodes = [
-            self.rng.choice(N, nodes_per_regime, replace=False)
+            self.rng.choice(N, cfg.nodes_per_regime, replace=False)
             for _ in range(self.R)
         ]
-        # slightly different mean amps per regime
-        self.regime_amp = base_amp * (1.0 + 0.25 * self.rng.standard_normal(self.R))
 
-        # also add a weak global sinusoid to make waves continuous
-        self.global_freq = 2 * np.pi / (self.period * 6.0)
+        # regime amplitudes slightly different but stable
+        self.regime_amp = cfg.base_amp * (1.0 + 0.15 * self.rng.standard_normal(self.R))
+
+        # slow wave in continuous time
+        self.global_freq = 2 * np.pi / (cfg.period * cfg.wave_period_slots)
 
     def regime_at_slot(self, slot: int) -> int:
-        return (slot // self.regime_period_slots) % self.R
+        return (slot // self.cfg.regime_period_slots) % self.R
 
     def env_fn(self, t: int, substrate: Substrate) -> np.ndarray:
-        slot = t // self.period
+        slot = t // self.cfg.period
         r = self.regime_at_slot(slot)
 
-        within = t % self.period
+        within = t % self.cfg.period
         I = np.zeros(self.N, dtype=substrate.cfg.dtype)
 
-        if within < self.pulse_len:
-            I[self.regime_nodes[r]] = self.regime_amp[r]
+        # soft pulse: ramp up / down to avoid sharp driving
+        if within < self.cfg.pulse_len:
+            # cosine ramp over the pulse window
+            phase = within / max(1, self.cfg.pulse_len - 1)
+            ramp = 0.5 - 0.5 * np.cos(np.pi * phase)
+            I[self.regime_nodes[r]] = self.regime_amp[r] * ramp
 
-        # Add continuous global wave + local noise always
-        global_wave = np.sin(self.global_freq * t)
-        I += global_wave * 0.15
-        I += self.noise_std * self.rng.standard_normal(self.N)
+        # slow background wave
+        I += self.cfg.wave_amp * np.sin(self.global_freq * t)
+
+        # small noise only
+        I += self.cfg.noise_std * self.rng.standard_normal(self.N)
 
         return I.astype(substrate.cfg.dtype)
 
-    # Only for our analysis/plots (substrate never sees it)
-    def regime_label_fn(self, t: int) -> int:
-        slot = t // self.period
-        return self.regime_at_slot(slot)
-
 
 # ---------------------------------------------------------------------
-# Main experiment
+# Main
 # ---------------------------------------------------------------------
 
 def main():
     # -------------------------
     # Configs
     # -------------------------
+    env_cfg = SmoothRegimeEnvConfig()
+
     substrate_cfg = SubstrateConfig(
-        N=180,
+        N=220,
         C=1.0,
         lam=0.03,
         dt=0.05,
@@ -146,38 +145,24 @@ def main():
         dt=substrate_cfg.dt,
         use_fitness_gate=True,
         symmetric_g=substrate_cfg.symmetric_g,
+        enable_create_prune=False,
         seed=0,
     )
 
-    period = 260
-    pulse_len = 35
-    relax_len = 110
+    slot_cfg = SlotConfig(pulse_len=env_cfg.pulse_len, relax_len=env_cfg.relax_len)
 
-    slot_cfg = SlotConfig(pulse_len=pulse_len, relax_len=relax_len)
-
-    env = RegimeNoiseEnvironment(
-        N=substrate_cfg.N,
-        regimes=4,
-        nodes_per_regime=8,
-        period=period,
-        pulse_len=pulse_len,
-        relax_len=relax_len,
-        regime_period_slots=8,
-        base_amp=0.7,
-        noise_std=0.25,
-        seed=3,
-    )
+    env = SmoothRegimeEnvironment(substrate_cfg.N, env_cfg)
 
     run_cfg = RunConfig(
-        total_steps=42000,
-        slot_period=period,
+        total_steps=68000,
+        slot_period=env_cfg.period,
         record_V=True,
         record_dV=False,
         record_metrics=True,
     )
 
     # -------------------------
-    # Run simulation
+    # Run
     # -------------------------
     out = run_simulation(
         substrate_cfg=substrate_cfg,
@@ -185,8 +170,8 @@ def main():
         run_cfg=run_cfg,
         env_fn=env.env_fn,
         slot_cfg=slot_cfg,
-        true_token_fn=None,   # unsupervised
-        seed=0
+        true_token_fn=None,   # fully unsupervised
+        seed=0,
     )
 
     V_hist = out["V_hist"]
@@ -195,35 +180,38 @@ def main():
     # -------------------------
     # Sample attractors per slot
     # -------------------------
+    period = env_cfg.period
     slots_total = run_cfg.total_steps // period
+
     sample_times = []
     samples = []
-    regime_labels = []
+    hidden_regimes = []
 
-    skip_slots = 12
+    skip_slots = 18  # allow hardware to settle first
     for slot in range(skip_slots, slots_total):
         t0 = slot * period
         ts = slot_cfg.sample_index(t0)
         if ts < run_cfg.total_steps:
             sample_times.append(ts)
             samples.append(V_hist[ts])
-            regime_labels.append(env.regime_at_slot(slot))
+            hidden_regimes.append(env.regime_at_slot(slot))
 
     sample_times = np.array(sample_times, dtype=np.int32)
     samples = np.array(samples)
-    regime_labels = np.array(regime_labels, dtype=np.int32)
+    hidden_regimes = np.array(hidden_regimes, dtype=np.int32)
 
     # -------------------------
     # Cluster emergent alphabet
     # -------------------------
-    cl_cfg = CosineClusterConfig(threshold=0.995)
+    # more tolerant threshold than Phase 1–3
+    cl_cfg = CosineClusterConfig(threshold=0.985)
     cluster_ids, reps, sizes = cluster_cosine_incremental(samples, cl_cfg)
 
     labels_map = build_unsupervised_labels(cluster_ids, prefix="T")
     decoded = decode_sequence(cluster_ids, labels_map)
 
-    print("\nPhase 4 results")
-    print("----------------")
+    print("\nPhase 4 results (FIXED)")
+    print("------------------------")
     print(f"samples: {len(samples)}")
     print(f"clusters_found: {len(reps)}")
     print(f"cluster_sizes: {sizes}")
@@ -232,18 +220,18 @@ def main():
     # -------------------------
     # Plots
     # -------------------------
-    plot_fitness(fitness_hist, title="Fitness F(t) — noisy environment", x_max=8000)
+    plot_fitness(fitness_hist, title="Fitness F(t) — self tokens (fixed)", x_max=12000)
 
     plot_cluster_ids_per_slot(
         slot_ids=(sample_times // period),
         cluster_ids=cluster_ids,
-        title="Emergent attractor clusters per slot (unsupervised alphabet)"
+        title="Emergent self-tokens per slot (unsupervised)"
     )
 
     plot_pca_samples(
         samples=samples,
-        sample_labels=regime_labels,
-        title="Attractor samples by hidden regime (PCA, for analysis only)"
+        sample_labels=hidden_regimes,
+        title="Self-token attractors vs hidden regimes (PCA)"
     )
 
     # -------------------------
@@ -251,7 +239,7 @@ def main():
     # -------------------------
     os.makedirs("runs", exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    path = f"runs/exp_self_tokens_{stamp}.npz"
+    path = f"runs/exp_self_tokens_fixed_{stamp}.npz"
 
     np.savez_compressed(
         path,
@@ -261,8 +249,9 @@ def main():
         attractor_id=cluster_ids.astype(np.int32),
         cluster_reps=reps.astype(np.float32),
         cluster_sizes=np.array(sizes, dtype=np.int32),
-        hidden_regime_labels=regime_labels.astype(np.int32),
+        hidden_regime_labels=hidden_regimes.astype(np.int32),
         unsupervised_token_samples=np.array(decoded, dtype="U8"),
+        env_cfg=np.array([env_cfg.__dict__], dtype=object),
     )
 
     print(f"\nSaved: {path}\n")
