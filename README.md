@@ -53,10 +53,6 @@ The goal is to study how:
 
 can emerge together from pure physics.
 
-### How a Real Capacitor Works
-![Capacitor Physics Explained](images/3D3711EE-FB1C-4AEE-9352-DF266EB53D5C.png)
-
-
 ⸻
 
 2. Capacitor Substrate Model
