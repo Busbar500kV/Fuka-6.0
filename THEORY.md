@@ -200,6 +200,9 @@ This is the clean unification:
 
 Capacitors → attractors → symbols → code → hardware → adaptation
 
+### Transition Graph (Attractor Finite-State Machine)
+![Transition Graph](images/transition_graph.png)
+
 ⸻
 
 🧩 9. Why this is important
