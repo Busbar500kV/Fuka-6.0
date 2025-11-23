@@ -2,6 +2,10 @@
 
 This section explains, in simple language, how real capacitors behave and how the Fuka-6.0 substrate uses a generalized capacitor model to create emergent symbols, code, and hardware.
 
+### How a Real Capacitor Works
+![Capacitor Physics Explained](images/3D3711EE-FB1C-4AEE-9352-DF266EB53D5C.png)
+
+
 ⸻
 
 🧩 1. What is a capacitor?
