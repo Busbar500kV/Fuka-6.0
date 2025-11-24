@@ -1,22 +1,16 @@
 #!/bin/bash
 # ------------------------------------------------------------
-# Fuka-6.0  |  run_local.sh  (enhanced)
+# Fuka-6.0  |  run_local.sh  (enhanced + auto log sync)
 #
-# Runs any experiment and automatically logs output to:
-#   runs/logs/<expname>_<timestamp>.log
-#
-# Enhancements:
-#   - Git branch/commit/dirty status recorded
-#   - Python version recorded
-#   - Runtime duration recorded
-#   - Exit code recorded
-#   - Detects latest NPZ saved during run
-#   - Supports passing through extra args to experiment
+# Runs any experiment and automatically:
+#   1) logs output to runs/logs/<expname>_<timestamp>.log
+#   2) copies that log into repo logs/<expname>_<timestamp>.log
+#   3) git add/commit/push the log to GitHub (SSH remote)
 #
 # Usage:
 #   ./tools/run_local.sh exp_phenotype
 #   ./tools/run_local.sh exp_modules
-#   ./tools/run_local.sh exp_phenotype --long_run 1
+#   ./tools/run_local.sh exp_phenotype --foo 3
 #
 # ------------------------------------------------------------
 
@@ -69,7 +63,9 @@ PRE_NPZ=$(ls -1t runs/*.npz 2>/dev/null | head -n 1 || true)
 GIT_BRANCH=""
 GIT_COMMIT=""
 GIT_DIRTY="unknown"
+IN_GIT_REPO="no"
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    IN_GIT_REPO="yes"
     GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
     GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "")
     if git diff --quiet && git diff --cached --quiet; then
@@ -103,7 +99,7 @@ echo "[run_local] Running: python -m experiments.${EXP_NAME} ${EXTRA_ARGS[*]}"
     echo "User: ${USER_NAME}"
     echo "Working dir: ${PWD_NOW}"
     echo "Python: ${PY_VER}"
-    if [ -n "$GIT_COMMIT" ]; then
+    if [ "$IN_GIT_REPO" = "yes" ]; then
         echo "Git branch: ${GIT_BRANCH}"
         echo "Git commit: ${GIT_COMMIT}"
         echo "Git status: ${GIT_DIRTY}"
@@ -151,6 +147,46 @@ echo "[run_local] Done."
 echo "[run_local] Output saved in: $LOGFILE"
 if [ "$NEW_NPZ" != "none" ]; then
     echo "[run_local] New NPZ saved: $NEW_NPZ"
+fi
+
+# ------------------------------------------------------------
+# Auto-sync log to GitHub
+# ------------------------------------------------------------
+if [ "$IN_GIT_REPO" = "yes" ]; then
+    mkdir -p logs
+    REPO_LOG="logs/$(basename "$LOGFILE")"
+    cp "$LOGFILE" "$REPO_LOG"
+
+    # Stage log
+    git add "$REPO_LOG"
+
+    # Only commit if there is something staged
+    if ! git diff --cached --quiet; then
+        COMMIT_MSG="Auto-sync log $(basename "$LOGFILE")"
+        set +e
+        git commit -m "$COMMIT_MSG" >/dev/null 2>&1
+        COMMIT_OK=$?
+        set -e
+
+        if [ $COMMIT_OK -eq 0 ]; then
+            set +e
+            git push >/dev/null 2>&1
+            PUSH_OK=$?
+            set -e
+
+            if [ $PUSH_OK -eq 0 ]; then
+                echo "[run_local] Log auto-pushed to GitHub: $REPO_LOG"
+            else
+                echo "[run_local] WARNING: log committed but push failed. You can push later."
+            fi
+        else
+            echo "[run_local] WARNING: log staged but commit failed. You can commit later."
+        fi
+    else
+        echo "[run_local] No new log changes to commit."
+    fi
+else
+    echo "[run_local] Git repo not detected. Skipping log auto-sync."
 fi
 
 exit $EXIT_CODE
