@@ -333,19 +333,21 @@ def main():
     path = f"runs/exp_modules_{stamp}.npz"
 
     # pack module membership into ragged list using object array
-    module_list = np.array(comps_sorted, dtype=object)
+    
+    modules_json = [c.tolist() for c in comps_sorted]
 
-    np.savez_compressed(
-        path,
-        **out,
+    payload = dict(out)
+    payload.update(
         hubs=hubs,
         hub_threshold=float(hub_thr),
         strong_edge_threshold=float(edge_thr),
-        modules=module_list,
+        modules_json=modules_json,   # <- list of lists
         slow_nodes=slow_nodes,
         slow_variance_threshold=float(slow_thr),
         variance_tail=var_tail.astype(np.float32),
     )
+    
+    savez_safe(path, payload)
 
     print(f"\nSaved: {path}\n")
 
