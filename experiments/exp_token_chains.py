@@ -46,6 +46,7 @@ from analysis.plots import (
     plot_pca_samples
 )
 
+from tools.safe_npz import savez_safe
 
 # ---------------------------------------------------------------------
 # Environment for repeating code strings
@@ -259,18 +260,22 @@ def main():
     stamp = time.strftime("%Y%m%d_%H%M%S")
     path = f"runs/exp_token_chains_{stamp}.npz"
 
-    np.savez_compressed(
-        path,
-        **out,
+    payload = dict(out)
+    payload.update(
         sample_times=sample_times,
         attractor_samples=samples.astype(np.float32),
         attractor_id=cluster_ids.astype(np.int32),
-        true_token_samples=true_tokens_samples,
-        decoded_token_samples=np.array(decoded, dtype="U1"),
         cluster_reps=reps.astype(np.float32),
         cluster_sizes=np.array(sizes, dtype=np.int32),
+        hidden_regime_labels=regime_labels.astype(np.int32),
+        unsupervised_token_samples=np.array(decoded, dtype="U8"),
+        E_hist=E_hist,
+        regime_hist=regime_hist,
+        substrate_readout_hist=readout_hist,
     )
-
+    
+    savez_safe(path, payload)
+    
     print(f"\nSaved: {path}\n")
 
 
