@@ -31,6 +31,7 @@ from core.plasticity import PlasticityConfig
 from core.metrics import SlotConfig
 from core.run import RunConfig, run_simulation
 
+from tools.safe_npz import savez_safe
 
 # ---------------------------------------------------------------------
 # A simple environment (reuse Phase-4 noisy regimes by default)
