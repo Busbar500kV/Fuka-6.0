@@ -57,6 +57,8 @@ from analysis.plots import (
     plot_pca_samples
 )
 
+from tools.safe_npz import savez_safe
+
 # ---------------------------------------------------------------------
 # Closed-loop environment (homeostasis refined)
 # ---------------------------------------------------------------------
