@@ -6,8 +6,7 @@ Common plotting utilities used by experiments.
 
 Notes
 -----
-- Only uses matplotlib (no seaborn).
-- Keep dependencies light: numpy + matplotlib + sklearn.decomposition.PCA.
+- Only uses matplotlib and numpy (no seaborn, no sklearn).
 - These helpers are for *analysis only* and are not part of the core model.
 """
 
@@ -17,7 +16,6 @@ from typing import Optional, Sequence, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.decomposition import PCA
 
 
 # ---------------------------------------------------------------------
@@ -53,6 +51,7 @@ def plot_fitness(fitness_hist: np.ndarray, title: str = "Fitness F(t)", x_max: O
     x_max : Optional[int]
         If provided, restrict x-axis to [0, x_max].
     """
+    fitness_hist = np.asarray(fitness_hist)
     T = len(fitness_hist)
     t = np.arange(T, dtype=np.int32)
 
@@ -96,8 +95,37 @@ def plot_cluster_ids_per_slot(
 
 
 # ---------------------------------------------------------------------
-# PCA visualization of attractor samples
+# PCA visualization of attractor samples (NumPy-only)
 # ---------------------------------------------------------------------
+
+
+def _pca_2d(samples: np.ndarray) -> np.ndarray:
+    """
+    Simple PCA to 2D using NumPy SVD (no sklearn dependency).
+
+    Parameters
+    ----------
+    samples : np.ndarray, shape (M, N)
+
+    Returns
+    -------
+    X_2d : np.ndarray, shape (M, 2)
+        PCA projection onto first two principal components.
+    """
+    X = np.asarray(samples, dtype=np.float64)
+    if X.ndim != 2:
+        raise ValueError("samples must be 2D array of shape (M, N)")
+
+    # center
+    mean = X.mean(axis=0, keepdims=True)
+    Xc = X - mean
+
+    # SVD: Xc = U S V^T
+    # rows of V^T are principal directions; take first 2
+    U, S, Vt = np.linalg.svd(Xc, full_matrices=False)
+    W = Vt[:2].T  # (N, 2)
+    X_2d = Xc @ W  # (M, 2)
+    return X_2d
 
 
 def plot_pca_samples(
@@ -107,7 +135,7 @@ def plot_pca_samples(
     annotate: bool = False,
 ) -> None:
     """
-    Project high-dimensional attractor samples to 2D with PCA and scatter-plot.
+    Project high-dimensional attractor samples to 2D with PCA (NumPy SVD) and scatter-plot.
 
     Parameters
     ----------
@@ -120,6 +148,7 @@ def plot_pca_samples(
     annotate : bool
         If True and labels are given, draw small text labels next to points.
     """
+    samples = np.asarray(samples)
     if samples.ndim != 2:
         raise ValueError("samples must be 2D array of shape (M, N)")
 
@@ -128,8 +157,7 @@ def plot_pca_samples(
         print("[plot_pca_samples] No samples to plot.")
         return
 
-    pca = PCA(n_components=2)
-    X = pca.fit_transform(samples)
+    X = _pca_2d(samples)
 
     plt.figure(figsize=(6, 6))
 
@@ -137,7 +165,6 @@ def plot_pca_samples(
         plt.scatter(X[:, 0], X[:, 1], s=10)
     else:
         sample_labels = np.asarray(sample_labels)
-        # To keep it simple, use labels as-is; matplotlib will choose colors.
         scatter = plt.scatter(X[:, 0], X[:, 1], s=10, c=sample_labels)
         cbar = plt.colorbar(scatter)
         cbar.set_label("label")
