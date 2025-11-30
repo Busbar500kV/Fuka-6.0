@@ -1,0 +1,20 @@
+=== Fuka-6.0 | Run started: Sun Nov 30 10:46:56 PM UTC 2025 ===
+Experiment: exp_longrun_phenotypecd
+Extra args: /home/busbar/Fuka-6.0
+----------------------------------------
+Host: busbar
+User: busbar
+Working dir: /home/busbar/Fuka-6.0
+Python: Python 3.12.3
+Git branch: main
+Git commit: 0aba777
+Git status: clean
+Pre-run latest NPZ: runs/exp_phenotype_fixed_20251129_230800.npz
+----------------------------------------
+/home/busbar/Fuka-6.0/venv/bin/python: No module named experiments.exp_longrun_phenotypecd
+----------------------------------------
+Exit code: 1
+Runtime: 0 seconds
+Post-run latest NPZ: runs/exp_phenotype_fixed_20251129_230800.npz
+New NPZ from this run: none
+=== Run finished: Sun Nov 30 10:46:56 PM UTC 2025 ===
