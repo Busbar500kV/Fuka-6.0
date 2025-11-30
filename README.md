@@ -445,8 +445,105 @@ This framework explains how:
 
 This is the conceptual foundation of Fuka-6.0.
 
-Phase-6.1 results:
+⸻
 
-29-Nov-2025:
-In a long Phase-6.1 run (180k steps), we observed 680 attractor samples clustered into 293 distinct prototypes. Despite this large state space, only 9 clusters had ≥10 occurrences, and these “core tokens” accounted for ≈58% of all samples. The remaining tokens formed a long tail of rare states. The scalar environment variable E(t) remained bounded in [0.0, 1.05] and converged toward ≈0.97, indicating a stable regime where the environment continuously energizes, and is shaped by, the substrate’s attractor dynamics.
+Phase-6 Phenotype Results
+
+Fuka-6.0 – Emergent alphabet, grammar, and substrate fingerprints
+
+This section summarizes the Phase-6.1 phenotype run:
+
+runs/exp_phenotype_fixed_20251129_230800.npz
+
+From a single long run, the system produced a finite attractor alphabet, a probabilistic grammar over that alphabet, and stable physical “fingerprints” for each attractor. All of this emerges from local capacitor dynamics and plasticity, without any external supervision.
+
+⸻
+
+1. Core attractor alphabet
+
+From 680 attractor samples, cosine clustering produced 293 distinct clusters.
+If we keep only clusters that appear at least 10 times, we get a core alphabet of 9 attractors:
+
+T1, T2, T3, T5, T8, T12, T14, T17, T24
+
+Key statistics:
+	•	Core alphabet coverage (clusters with count ≥ 10): 57.9% of all samples.
+	•	The largest clusters have sizes: 95, 69, 61, 41, 33, 32, 32, 16, 15.
+	•	The top 4 attractors alone cover roughly 40–45% of all samples.
+
+This means the substrate settles repeatedly into a small, re-used set of attractor codes, rather than visiting all states uniformly. In the Fuka view, this set is the emergent symbolic alphabet of the phenotype.
+
+⸻
+
+2. Emergent phenotype grammar
+
+We can build a Markov grammar over the core alphabet by looking at transitions from one core attractor to the next. The strongest core-to-core transitions are:
+	•	T12 → T24 with probability ~0.73 (30 transitions)
+	•	T1 → T17 with probability ~0.52 (32 transitions)
+	•	T2 → T3 with probability ~0.45 (31 transitions)
+	•	Self-loops such as T2 → T2 and T1 → T1
+	•	Connector edges like T2 → T8, T3 → T5, T24 → T5
+
+This defines a directed grammar where some attractors tend to follow others in a strongly biased way. The result is not a random walk. It is closer to a simple symbolic language with:
+	•	Recurrent motifs (T12↔T24, T1→T17→T5, T2→T3→T5)
+	•	Stable loops and hubs
+	•	A small set of high-probability “grammar rules”
+
+![Phenotype grammar](images/phenotype_grammar_latest.png)
+
+Figure 1 – Core phenotype grammar graph
+
+Figure 1: Graph of the core attractor alphabet. Nodes are the 9 most frequent attractors (T1, T2, T3, T5, T8, T12, T14, T17, T24). Directed edges show transitions between them. Edge thickness and labels encode transition probability and counts. The strongest motifs are T12 → T24, T1 → T17, and T2 → T3, indicating that the phenotype dynamics concentrate onto a small number of repeated symbolic patterns.
+
+⸻
+
+3. Environment-dependent syntax
+
+The environment has a scalar state E(t) which is updated by the substrate and in turn modulates how strongly energy is injected. If we sample the environment value at the same times we take attractor snapshots and split by the median of E:
+	•	Low-E band: more exploratory, almost no stable core-to-core transitions.
+	•	High-E band: grammar becomes much more deterministic:
+	•	T1 → T17 reaches probability 1.0 in high-E samples.
+	•	T12 → T24 reaches probability ~0.94.
+	•	T2 → T3 reaches probability ~0.63.
+
+So when the environment is “energized”, the system collapses into a more rigid grammar. When energy is lower, it wanders and explores more codes.
+
+In other words:
+
+The scalar environment state controls how grammatical the behaviour is.
+High energy = more strongly structured syntax.
+Low energy = more diffuse, exploratory syntax.
+
+⸻
+
+4. Attractor fingerprints in substrate space
+
+Each attractor can also be represented by its physical fingerprint: the mean voltage vector of the capacitor network whenever the system visits that attractor.
+
+By projecting these fingerprints to 2D using PCA, we see that:
+	•	Attractors that are grammatically connected (for example T12 and T24, or T1 and T17) tend to lie close to each other in fingerprint space.
+	•	Attractors that rarely or never follow each other are more separated.
+
+This means the symbolic grammar is not arbitrary. It is grounded in the actual physical geometry of the capacitor voltages.
+
+![Attractor fingerprints](images/phenotype_fingerprints_latest.png)
+
+Figure 2 – PCA map of core attractor fingerprints
+
+Figure 2: PCA projection of the mean voltage fingerprints for the 9 core attractors. Each point is one attractor (T1, T2, T3, T5, T8, T12, T14, T17, T24). Attractors that often follow each other in the grammar tend to be neighbours in this space (for example T12 and T24). This links symbolic transitions directly to physical similarity in the capacitor substrate.
+
+⸻
+
+5. Interpretation
+
+Putting everything together:
+	•	A finite attractor alphabet emerges spontaneously from local physics.
+	•	This alphabet carries a probabilistic grammar with strong repeated motifs.
+	•	The grammar sharpens at high environment energy and weakens at low energy.
+	•	Attractor identities are not abstract variables; they are bound to physical fingerprints in the capacitor network.
+
+From the Fuka-6.0 point of view, this run is a first concrete example of:
+
+A physical substrate that invents its own symbols, grammar, and phenotype-level behaviour from nothing more than energy flow, local plasticity, and a closed loop with its environment.
+
 
