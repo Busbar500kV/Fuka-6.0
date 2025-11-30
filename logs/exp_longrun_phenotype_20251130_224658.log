@@ -1,0 +1,29 @@
+=== Fuka-6.0 | Run started: Sun Nov 30 10:46:58 PM UTC 2025 ===
+Experiment: exp_longrun_phenotype
+Extra args: (none)
+----------------------------------------
+Host: busbar
+User: busbar
+Working dir: /home/busbar/Fuka-6.0
+Python: Python 3.12.3
+Git branch: main
+Git commit: 3e6343e
+Git status: clean
+Pre-run latest NPZ: runs/exp_phenotype_fixed_20251129_230800.npz
+----------------------------------------
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/busbar/Fuka-6.0/experiments/exp_longrun_phenotype.py", line 39, in <module>
+    from experiments.exp_phenotype import ClosedLoopEnvConfig, ClosedLoopEnvironment
+  File "/home/busbar/Fuka-6.0/experiments/exp_phenotype.py", line 54, in <module>
+    from analysis.plots import (
+  File "/home/busbar/Fuka-6.0/analysis/plots.py", line 20, in <module>
+    from sklearn.decomposition import PCA
+ModuleNotFoundError: No module named 'sklearn'
+----------------------------------------
+Exit code: 1
+Runtime: 1 seconds
+Post-run latest NPZ: runs/exp_phenotype_fixed_20251129_230800.npz
+New NPZ from this run: none
+=== Run finished: Sun Nov 30 10:46:59 PM UTC 2025 ===
