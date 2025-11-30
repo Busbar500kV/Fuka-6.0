@@ -445,3 +445,8 @@ This framework explains how:
 
 This is the conceptual foundation of Fuka-6.0.
 
+Phase-6.1 results:
+
+29-Nov-2025:
+In a long Phase-6.1 run (180k steps), we observed 680 attractor samples clustered into 293 distinct prototypes. Despite this large state space, only 9 clusters had ≥10 occurrences, and these “core tokens” accounted for ≈58% of all samples. The remaining tokens formed a long tail of rare states. The scalar environment variable E(t) remained bounded in [0.0, 1.05] and converged toward ≈0.97, indicating a stable regime where the environment continuously energizes, and is shaped by, the substrate’s attractor dynamics.
+
