@@ -58,7 +58,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 
 import numpy as np
 
@@ -68,7 +68,19 @@ from core.metrics import SlotConfig
 from core.run import RunConfig, run_simulation
 
 from experiments.exp_phenotype import ClosedLoopEnvConfig  # reuse config shape
-from utils.saving import savez_safe
+
+
+# ---------------------------------------------------------------------
+# Local safe NPZ helper (no pickles)
+# ---------------------------------------------------------------------
+
+
+def savez_safe(path: str, payload: Dict[str, Any]) -> None:
+    """
+    Save a dict of arrays into a compressed .npz file with pickling disabled.
+    """
+    # Ensure keys are strings and values are array-like
+    np.savez_compressed(path, **payload)
 
 
 # ---------------------------------------------------------------------
@@ -256,15 +268,11 @@ class AutoTuningEnvironment:
         using a simple proportional controller on the mean E over a
         sliding window of slots.
         """
-        # Nothing to do if we have too few slots
         if self.slot_index < 1:
             return
 
         # Limit window to the last homeo_window_slots slots
         w = self.auto.homeo_window_slots
-        # E_hist is per time step; we approximate per-slot E as
-        # the mean E over the step range for those slots.
-        # For simplicity, just take the last w*period steps.
         period = self.cfg.period
         steps = w * period
         E_arr = np.array(self.E_hist, dtype=np.float32)
@@ -299,9 +307,6 @@ class AutoTuningEnvironment:
 
         We define:
             novelty_rate = (# unique hashes) / (window length)
-
-        1.0 => every slot looks different at this coarse scale.
-        ~0  => system is stuck in very few fingerprints.
         """
         if not self.hash_window:
             return 0.0
@@ -386,7 +391,6 @@ class AutoTuningEnvironment:
 
         # --- End-of-slot slow updates ---
         if within == self.cfg.period - 1:
-            # New slot completed
             self._on_slot_end(slot, substrate)
 
         return I.astype(substrate.cfg.dtype)
@@ -435,7 +439,6 @@ def main() -> None:
     # -------------------------
     # Configs
     # -------------------------
-    # Substrate and plasticity are kept relatively modest here.
     substrate_cfg = SubstrateConfig(
         N=220,
         C=1.0,
@@ -570,10 +573,8 @@ def main() -> None:
     stamp = time.strftime("%Y%m%d_%H%M%S")
     path = f"runs/exp_autotune_phenotype_{stamp}.npz"
 
-    # Build payload without pickles
     payload: Dict[str, Any] = dict(out)
 
-    # Add environment histories
     payload.update(
         E_hist=E_hist,
         regime_hist=np.array(env.regime_hist, dtype=np.int32),
