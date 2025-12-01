@@ -1,0 +1,25 @@
+=== Fuka-6.0 | Run started: Mon Dec  1 03:02:55 AM UTC 2025 ===
+Experiment: exp_autotune_phenotype
+Extra args: (none)
+----------------------------------------
+Host: busbar
+User: busbar
+Working dir: /home/busbar/Fuka-6.0
+Python: Python 3.12.3
+Git branch: main
+Git commit: 1befc56
+Git status: clean
+Pre-run latest NPZ: runs/exp_longrun_phenotype_20251201_005507.npz
+----------------------------------------
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/busbar/Fuka-6.0/experiments/exp_autotune_phenotype.py", line 71, in <module>
+    from utils.saving import savez_safe
+ModuleNotFoundError: No module named 'utils'
+----------------------------------------
+Exit code: 1
+Runtime: 1 seconds
+Post-run latest NPZ: runs/exp_longrun_phenotype_20251201_005507.npz
+New NPZ from this run: none
+=== Run finished: Mon Dec  1 03:02:56 AM UTC 2025 ===
