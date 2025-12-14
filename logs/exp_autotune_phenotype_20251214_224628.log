@@ -1,0 +1,29 @@
+=== Fuka-6.0 | Run started: Sun Dec 14 10:46:28 PM UTC 2025 ===
+Experiment: exp_autotune_phenotype
+Extra args: (none)
+----------------------------------------
+Host: busbar
+User: busbar
+Working dir: /home/busbar/Fuka-6.0
+Python: Python 3.12.3
+Git branch: main
+Git commit: 52da043
+Git status: clean
+Pre-run latest NPZ: runs/exp_autotune_phenotype_20251201_034700.npz
+----------------------------------------
+Traceback (most recent call last):
+  File "<frozen runpy>", line 189, in _run_module_as_main
+  File "<frozen runpy>", line 159, in _get_module_details
+  File "<frozen importlib._bootstrap_external>", line 1129, in get_code
+  File "<frozen importlib._bootstrap_external>", line 1059, in source_to_code
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/busbar/Fuka-6.0/experiments/exp_autotune_phenotype.py", line 75
+    from __future__ import annotations
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SyntaxError: from __future__ imports must occur at the beginning of the file
+----------------------------------------
+Exit code: 1
+Runtime: 0 seconds
+Post-run latest NPZ: runs/exp_autotune_phenotype_20251201_034700.npz
+New NPZ from this run: none
+=== Run finished: Sun Dec 14 10:46:28 PM UTC 2025 ===
