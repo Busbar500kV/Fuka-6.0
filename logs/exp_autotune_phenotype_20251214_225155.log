@@ -1,0 +1,46 @@
+=== Fuka-6.0 | Run started: Sun Dec 14 10:51:55 PM UTC 2025 ===
+Experiment: exp_autotune_phenotype
+Extra args: (none)
+----------------------------------------
+Host: busbar
+User: busbar
+Working dir: /home/busbar/Fuka-6.0
+Python: Python 3.12.3
+Git branch: main
+Git commit: ba6b5ec
+Git status: clean
+Pre-run latest NPZ: runs/exp_autotune_phenotype_20251201_034700.npz
+----------------------------------------
+epoch=00  E_mean=1.945  E_std=0.142  err=-1.445  in_band=False  feedback_gain=0.0020  E_leak=0.0080  noise=0.250
+epoch=01  E_mean=0.688  E_std=0.050  err=-0.188  in_band=False  feedback_gain=0.0020  E_leak=0.0080  noise=0.250
+epoch=02  E_mean=0.688  E_std=0.049  err=-0.188  in_band=False  feedback_gain=0.0020  E_leak=0.0080  noise=0.250
+epoch=03  E_mean=0.690  E_std=0.048  err=-0.190  in_band=False  feedback_gain=0.0020  E_leak=0.0080  noise=0.250
+epoch=04  E_mean=0.693  E_std=0.047  err=-0.193  in_band=False  feedback_gain=0.0020  E_leak=0.0080  noise=0.250
+epoch=05  E_mean=0.693  E_std=0.046  err=-0.193  in_band=False  feedback_gain=0.0020  E_leak=0.0080  noise=0.250
+epoch=06  E_mean=0.688  E_std=0.049  err=-0.188  in_band=False  feedback_gain=0.0020  E_leak=0.0080  noise=0.250
+epoch=07  E_mean=0.692  E_std=0.047  err=-0.192  in_band=False  feedback_gain=0.0020  E_leak=0.0080  noise=0.250
+epoch=08  E_mean=0.693  E_std=0.047  err=-0.193  in_band=False  feedback_gain=0.0020  E_leak=0.0080  noise=0.250
+epoch=09  E_mean=0.691  E_std=0.048  err=-0.191  in_band=False  feedback_gain=0.0020  E_leak=0.0080  noise=0.250
+epoch=10  E_mean=0.693  E_std=0.046  err=-0.193  in_band=False  feedback_gain=0.0020  E_leak=0.0080  noise=0.250
+epoch=11  E_mean=0.693  E_std=0.046  err=-0.193  in_band=False  feedback_gain=0.0020  E_leak=0.0080  noise=0.250
+epoch=12  E_mean=0.691  E_std=0.048  err=-0.191  in_band=False  feedback_gain=0.0020  E_leak=0.0080  noise=0.250
+epoch=13  E_mean=0.691  E_std=0.047  err=-0.191  in_band=False  feedback_gain=0.0020  E_leak=0.0080  noise=0.250
+
+Phase Autotune results
+----------------------
+epochs        : 14
+steps/epoch   : 52000
+target        : 0.500
+band          : ±0.120
+final knobs   : feedback_gain=0.0020  E_leak=0.0080  noise_std=0.250
+samples       : 188
+clusters_seen : 188
+Saved: runs/exp_autotune_phenotype_20251214_233412.npz
+Runtime: 2538.4 s
+
+----------------------------------------
+Exit code: 0
+Runtime: 2539 seconds
+Post-run latest NPZ: runs/exp_autotune_phenotype_20251214_233412.npz
+New NPZ from this run: runs/exp_autotune_phenotype_20251214_233412.npz
+=== Run finished: Sun Dec 14 11:34:14 PM UTC 2025 ===
