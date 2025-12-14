@@ -52,13 +52,32 @@ Output
         noise_scale_hist       : slow-tuned noise_scale per slot
         novelty_hist           : novelty rate per slot
 """
+"""
+Fuka-6.0 Experiment: exp_autotune_phenotype
+Self-tuning phenotype loop (no manual tuning)
+
+Core idea:
+  - Closed-loop environment with scalar E(t)
+  - Add a thermostat T(t) that automatically adjusts exploration (noise + excitation)
+  - Use a lightweight online "alphabet probe" from attractor samples
+  - Tune T using core_coverage in a sliding window:
+        T <- T * exp(k*(target_coverage - observed_coverage))
+
+What it produces:
+  - NPZ: runs/exp_autotune_phenotype_fixed_<stamp>.npz
+  - Report (Markdown): runs/reports/exp_autotune_phenotype_<stamp>.md
+  - Optional triggered snapshots: runs/exp_autotune_phenotype_snap_<stamp>_kXXXXXX.npz
+
+Run:
+  python -m experiments.exp_autotune_phenotype
+"""
 
 from __future__ import annotations
 
 import os
 import time
 from dataclasses import dataclass
-from typing import List, Dict, Any
+from typing import Dict, Any, List, Optional, Tuple
 
 import numpy as np
 
@@ -67,378 +86,370 @@ from core.plasticity import PlasticityConfig
 from core.metrics import SlotConfig
 from core.run import RunConfig, run_simulation
 
-from experiments.exp_phenotype import ClosedLoopEnvConfig  # reuse config shape
 
+# -----------------------------
+# Safe NPZ saving (no pickles)
+# -----------------------------
 
-# ---------------------------------------------------------------------
-# Local safe NPZ helper (no pickles)
-# ---------------------------------------------------------------------
-
+def _is_pickle_risky_array(x: Any) -> bool:
+    return isinstance(x, np.ndarray) and x.dtype == object
 
 def savez_safe(path: str, payload: Dict[str, Any]) -> None:
     """
-    Save a dict of arrays into a compressed .npz file with pickling disabled.
+    Save with allow_pickle=False compatibility.
+    Reject object arrays (ragged lists etc.).
     """
-    # Ensure keys are strings and values are array-like
-    np.savez_compressed(path, **payload)
+    clean: Dict[str, Any] = {}
+    for k, v in payload.items():
+        if _is_pickle_risky_array(v):
+            raise ValueError(f"savez_safe: key '{k}' is object array (pickle risk). Refuse to save.")
+        clean[k] = v
+    np.savez_compressed(path, **clean)
 
 
-# ---------------------------------------------------------------------
-# Autotuning config (very slow, global feedback)
-# ---------------------------------------------------------------------
-
+# -----------------------------
+# Online cosine clustering probe
+# -----------------------------
 
 @dataclass
-class AutoTuneConfig:
+class OnlineClusterConfig:
+    threshold: float = 0.995  # cosine similarity threshold
+    max_reps: int = 20000     # safety cap (avoid RAM blowups)
+
+class OnlineCosineCluster:
     """
-    Slow control parameters for the self-tuning loop.
+    Incremental clustering of attractor samples by cosine similarity.
+    Maintains:
+      - reps: (K,N) float32
+      - counts: (K,) int32
+      - assigns: list[int] for each sample
     """
+    def __init__(self, cfg: OnlineClusterConfig, dim: int, dtype=np.float32):
+        self.cfg = cfg
+        self.dim = dim
+        self.dtype = dtype
+        self.reps = np.zeros((0, dim), dtype=dtype)
+        self.counts = np.zeros((0,), dtype=np.int32)
 
-    # --- Environment homeostasis ---
-    E_target: float = 0.7          # desired mean fraction of E_clip
-    homeo_window_slots: int = 64   # how many recent slots to average over
-    homeo_interval_slots: int = 16 # how often (in slots) to apply update
+    @staticmethod
+    def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
+        # a,b are 1D
+        na = float(np.linalg.norm(a) + 1e-12)
+        nb = float(np.linalg.norm(b) + 1e-12)
+        return float(np.dot(a, b) / (na * nb))
 
-    homeo_lr_drive: float = 0.005      # learning rate for E_drive
-    homeo_lr_feedback: float = 0.001   # learning rate for feedback_gain
+    def assign(self, x: np.ndarray) -> int:
+        x = x.astype(self.dtype, copy=False)
 
-    E_drive_min: float = 0.0
-    E_drive_max: float = 0.02
-    feedback_min: float = 0.0
-    feedback_max: float = 0.08
+        if self.reps.shape[0] == 0:
+            self.reps = x[None, :].copy()
+            self.counts = np.array([1], dtype=np.int32)
+            return 0
 
-    # --- Novelty-based tuning of noise ---
-    # We do NOT change plasticity eta here, only environment noise.
-    novelty_window_slots: int = 256     # slots included in novelty estimate
-    novelty_update_interval: int = 32   # how often (in slots) to update noise_scale
-    novelty_target: float = 0.5         # target fraction of unique patterns
+        # brute-force cosine against reps (K up to a few thousand typically OK)
+        best_i = -1
+        best_s = -1.0
+        for i in range(self.reps.shape[0]):
+            s = self._cosine_sim(x, self.reps[i])
+            if s > best_s:
+                best_s = s
+                best_i = i
 
-    novelty_lr_noise: float = 0.4       # how strongly novelty error nudges noise_scale
+        if best_s >= self.cfg.threshold:
+            self.counts[best_i] += 1
+            return int(best_i)
 
-    noise_scale_min: float = 0.2
-    noise_scale_max: float = 3.0
+        # new rep
+        if self.reps.shape[0] >= self.cfg.max_reps:
+            # if we hit cap, force-assign to best anyway
+            self.counts[best_i] += 1
+            return int(best_i)
 
-    # --- Hashing parameters for coarse "attractor fingerprints" ---
-    hash_dim: int = 16                  # dimension of random projection
-    max_hash_window: int = 512          # maximum window of hash codes per slot
-
-
-# ---------------------------------------------------------------------
-# Auto-tuning closed-loop environment
-# ---------------------------------------------------------------------
+        self.reps = np.vstack([self.reps, x[None, :]])
+        self.counts = np.concatenate([self.counts, np.array([1], dtype=np.int32)])
+        return int(self.reps.shape[0] - 1)
 
 
-class AutoTuningEnvironment:
+# -----------------------------
+# Sliding window coverage probe
+# -----------------------------
+
+class SlidingCoverageProbe:
     """
-    Closed-loop environment with self-tuning on two slow timescales:
+    Tracks core_coverage in a sliding window of cluster ids.
 
-      1) Keeps E(t) in a target band by adapting E_drive and feedback_gain.
-      2) Balances novelty vs recurrence by adapting noise_scale.
-
-    The "novelty" signal is computed from cheap sign-hash fingerprints
-    of V at the end of each slot, so there is no heavy clustering
-    inside the main run.
+    core_coverage(window) = fraction of samples in window belonging to clusters
+    with count >= core_threshold (computed within the window itself).
     """
+    def __init__(self, window: int = 500, core_threshold: int = 10):
+        self.window = int(window)
+        self.core_threshold = int(core_threshold)
+        self.buf = np.full((self.window,), -1, dtype=np.int32)
+        self.ptr = 0
+        self.filled = 0
 
-    def __init__(
-        self,
-        N: int,
-        env_cfg: ClosedLoopEnvConfig,
-        auto_cfg: AutoTuneConfig,
-        seed: int = 7,
-    ):
-        self.N = N
-        self.cfg = env_cfg
-        self.auto = auto_cfg
+    def update(self, cid: int) -> None:
+        self.buf[self.ptr] = int(cid)
+        self.ptr = (self.ptr + 1) % self.window
+        self.filled = min(self.window, self.filled + 1)
 
+    def coverage(self) -> float:
+        if self.filled < max(20, self.core_threshold * 2):
+            return 0.0
+        b = self.buf[:self.filled]
+        # counts within window
+        uniq, cnt = np.unique(b, return_counts=True)
+        core = set(int(u) for u, c in zip(uniq, cnt) if int(c) >= self.core_threshold)
+        if not core:
+            return 0.0
+        hits = sum(1 for x in b if int(x) in core)
+        return float(hits / len(b))
+
+    def novelty_rate(self) -> float:
+        if self.filled < 50:
+            return 1.0
+        b = self.buf[:self.filled]
+        uniq = len(set(int(x) for x in b))
+        return float(uniq / len(b))
+
+
+# -----------------------------
+# Closed-loop + thermostat
+# -----------------------------
+
+@dataclass
+class AutoTuneEnvConfig:
+    period: int = 260
+    pulse_len: int = 35
+    relax_len: int = 110
+
+    regimes: int = 3
+    nodes_per_regime: int = 9
+
+    base_amp: float = 0.8
+    noise_std: float = 0.18
+
+    # scalar E(t)
+    E_init: float = 0.0
+    E_leak: float = 0.008
+    E_drive: float = 0.004
+    E_clip: float = 2.0
+    feedback_gain: float = 0.03
+    feedback_mode: str = "energy"  # "energy" or "sign"
+
+    # excitation scaling (gentler than 1+E)
+    E_scale_factor: float = 0.35
+
+    # thermostat parameters
+    T_init: float = 1.0
+    T_min: float = 0.25
+    T_max: float = 3.00
+    T_k: float = 0.8                 # learning rate in exp update
+    target_coverage: float = 0.40     # desired core_coverage
+    tune_every_slots: int = 20        # update T every N slots
+
+    # how thermostat affects environment
+    T_affects_noise: bool = True
+    T_affects_amp: bool = True
+
+    # soft saturation (avoid hard clipping flatline)
+    soft_saturate_E: bool = True
+
+
+class AutoTuneEnvironment:
+    def __init__(self, N: int, cfg: AutoTuneEnvConfig, seed: int = 5):
+        self.N = int(N)
+        self.cfg = cfg
         self.rng = np.random.default_rng(seed)
 
-        # --- Spatial regimes (same spirit as exp_phenotype) ---
-        self.R = env_cfg.regimes
+        self.R = cfg.regimes
         self.regime_nodes = [
-            self.rng.choice(N, env_cfg.nodes_per_regime, replace=False)
+            self.rng.choice(N, cfg.nodes_per_regime, replace=False)
             for _ in range(self.R)
         ]
-        self.regime_amp = env_cfg.base_amp * (
-            1.0 + 0.25 * self.rng.standard_normal(self.R)
-        )
+        self.regime_amp = cfg.base_amp * (1.0 + 0.25 * self.rng.standard_normal(self.R))
         self.regime_period_slots = 7
-        self.global_freq = 2 * np.pi / (env_cfg.period * 6.0)
+        self.global_freq = 2 * np.pi / (cfg.period * 6.0)
 
-        # --- Scalar environment state E(t) ---
-        self.E = float(env_cfg.E_init)
-        self.E_clip = float(env_cfg.E_clip)
+        self.E = float(cfg.E_init)
+        self.T = float(cfg.T_init)
 
-        # We keep mutable copies of drive/gain that will drift:
-        self.E_drive = float(env_cfg.E_drive)
-        self.feedback_gain = float(env_cfg.feedback_gain)
-
-        # --- Noise scale factor (autotuned) ---
-        self.noise_scale = 1.0
-
-        # --- Logs (per time step or per slot) ---
+        # logs
         self.E_hist: List[float] = []
+        self.T_hist: List[float] = []
         self.regime_hist: List[int] = []
         self.readout_hist: List[float] = []
-
-        self.slot_index: int = 0  # counts slots
-
-        # Per-slot logs of slow variables:
-        self.E_drive_hist: List[float] = []
-        self.feedback_gain_hist: List[float] = []
-        self.noise_scale_hist: List[float] = []
-        self.novelty_hist: List[float] = []
-
-        # --- Hash-based "attractor fingerprints" ---
-        # Random projection matrix: hash_dim x N with +/-1 entries
-        self.hash_dim = auto_cfg.hash_dim
-        self.hash_matrix = self.rng.choice(
-            [-1.0, 1.0], size=(self.hash_dim, N)
-        ).astype(np.float32)
-
-        # Rolling window of hash integers (one per slot)
-        self.hash_window: List[int] = []
-
-    # -------------------------------
-    # Core environment pieces
-    # -------------------------------
+        self.noise_hist: List[float] = []
+        self.amp_scale_hist: List[float] = []
 
     def regime_at_slot(self, slot: int) -> int:
         return (slot // self.regime_period_slots) % self.R
 
     def substrate_readout(self, substrate: Substrate) -> float:
-        """
-        Minimal readout from substrate to environment.
-
-        We reuse the "energy" mode, as in exp_phenotype:
-            readout = ||V||^2 / N
-        """
         V = substrate.V.astype(np.float64)
-        return float(np.dot(V, V) / len(V))
+        if self.cfg.feedback_mode == "energy":
+            return float(np.dot(V, V) / len(V))
+        if self.cfg.feedback_mode == "sign":
+            return float(np.mean(V))
+        raise ValueError(f"Unknown feedback_mode {self.cfg.feedback_mode}")
+
+    def _soft_sat(self, x: float) -> float:
+        # smooth clip: E = E_clip * tanh(E/E_clip)
+        c = float(self.cfg.E_clip)
+        return float(c * np.tanh(x / max(c, 1e-9)))
 
     def update_environment(self, readout: float) -> None:
-        """
-        Update scalar E(t) using substrate readout.
-
-        Dynamics:
-            dE/dt = -E_leak * E + E_drive + feedback_gain * tanh(readout)
-
-        E_drive and feedback_gain will themselves be slowly adapted
-        via homeostasis rules (see _apply_homeostasis).
-        """
         phi = np.tanh(readout)
+        dE = (-self.cfg.E_leak * self.E) + self.cfg.E_drive + (self.cfg.feedback_gain * phi)
+        self.E = float(self.E + dE)
 
-        dE = (
-            -self.cfg.E_leak * self.E
-            + self.E_drive
-            + self.feedback_gain * phi
-        )
-        self.E += dE
-        self.E = float(np.clip(self.E, -self.E_clip, self.E_clip))
+        if self.cfg.soft_saturate_E:
+            self.E = self._soft_sat(self.E)
+        else:
+            self.E = float(np.clip(self.E, -self.cfg.E_clip, self.cfg.E_clip))
 
-    def _hash_V(self, V: np.ndarray) -> int:
-        """
-        Compute a coarse binary fingerprint of the current V.
-
-        1) Project V into a low-dimensional space using a random +/-1 matrix.
-        2) Take signs of the projection.
-        3) Pack sign bits into a single integer.
-
-        This is not meant to be collision-free, only to detect rough
-        similarity vs difference across slots.
-        """
-        v = V.astype(np.float32)
-        proj = self.hash_matrix @ v  # shape: (hash_dim,)
-        bits = proj > 0.0
-
-        code = 0
-        for b in bits:
-            code = (code << 1) | int(bool(b))
-        return code
-
-    # -------------------------------
-    # Slow control rules
-    # -------------------------------
-
-    def _apply_homeostasis(self) -> None:
-        """
-        Homeostasis for environment energy:
-
-        Keep E(t) in a mid-band by nudging E_drive and feedback_gain
-        using a simple proportional controller on the mean E over a
-        sliding window of slots.
-        """
-        if self.slot_index < 1:
-            return
-
-        # Limit window to the last homeo_window_slots slots
-        w = self.auto.homeo_window_slots
-        period = self.cfg.period
-        steps = w * period
-        E_arr = np.array(self.E_hist, dtype=np.float32)
-        if E_arr.size < steps:
-            return
-
-        E_window = E_arr[-steps:]
-        E_mean = float(E_window.mean())
-        E_target_abs = self.auto.E_target * self.E_clip
-        err = E_mean - E_target_abs  # positive if E too high
-
-        # Nudge E_drive and feedback_gain downward if E is too high,
-        # upward if E is too low.
-        self.E_drive -= self.auto.homeo_lr_drive * err
-        self.feedback_gain -= self.auto.homeo_lr_feedback * err
-
-        # Clip to reasonable ranges
-        self.E_drive = float(
-            np.clip(self.E_drive, self.auto.E_drive_min, self.auto.E_drive_max)
-        )
-        self.feedback_gain = float(
-            np.clip(
-                self.feedback_gain,
-                self.auto.feedback_min,
-                self.auto.feedback_max,
-            )
-        )
-
-    def _compute_novelty(self) -> float:
-        """
-        Estimate novelty rate in the recent window of hash codes.
-
-        We define:
-            novelty_rate = (# unique hashes) / (window length)
-        """
-        if not self.hash_window:
-            return 0.0
-        window = self.hash_window[-self.auto.novelty_window_slots :]
-        length = len(window)
-        if length == 0:
-            return 0.0
-        unique = len(set(window))
-        return float(unique) / float(length)
-
-    def _apply_novelty_balance(self, novelty_rate: float) -> None:
-        """
-        Tuning of environment noise based on novelty.
-
-        - If novelty_rate > novelty_target:
-              system is too chaotic => reduce noise_scale.
-        - If novelty_rate < novelty_target:
-              system is too rigid   => increase noise_scale.
-        """
-        err = novelty_rate - self.auto.novelty_target
-
-        # Move noise_scale opposite the sign of err:
-        #  - positive err => novelty too high => scale below 1
-        #  - negative err => novelty too low  => scale above 1
-        factor = 1.0 - self.auto.novelty_lr_noise * err
-        self.noise_scale *= factor
-
-        self.noise_scale = float(
-            np.clip(
-                self.noise_scale,
-                self.auto.noise_scale_min,
-                self.auto.noise_scale_max,
-            )
-        )
-
-    # -------------------------------
-    # Main environment hook
-    # -------------------------------
+    def tune_thermostat(self, observed_coverage: float) -> None:
+        # T <- T * exp(k*(target - observed))
+        err = float(self.cfg.target_coverage - observed_coverage)
+        self.T *= float(np.exp(self.cfg.T_k * err))
+        self.T = float(np.clip(self.T, self.cfg.T_min, self.cfg.T_max))
 
     def env_fn(self, t: int, substrate: Substrate) -> np.ndarray:
-        """
-        This function is called by the simulator at every time step.
-
-        Order:
-          1) Compute current slot.
-          2) Read substrate and update environment E(t).
-          3) Build injection current I(t).
-          4) At the end of each slot, update slow controllers using
-             hashed V fingerprints and E statistics.
-        """
         slot = t // self.cfg.period
         r = self.regime_at_slot(slot)
-        within = t % self.cfg.period
 
-        # --- substrate -> environment ---
         readout = self.substrate_readout(substrate)
         self.update_environment(readout)
 
-        # Log per-step env state
-        self.E_hist.append(self.E)
-        self.regime_hist.append(r)
-        self.readout_hist.append(readout)
+        # scale from E (gentler than 1+E)
+        amp_scale = 1.0 + self.cfg.E_scale_factor * self.E
+        amp_scale = float(max(0.05, amp_scale))
 
-        # --- Build I(t) ---
+        # thermostat application
+        noise_std = self.cfg.noise_std
+        if self.cfg.T_affects_noise:
+            noise_std = float(noise_std * self.T)
+
+        if self.cfg.T_affects_amp:
+            amp_scale = float(amp_scale * self.T)
+
+        within = t % self.cfg.period
         I = np.zeros(self.N, dtype=substrate.cfg.dtype)
 
-        # Regime-based pulse, scaled by (1 + E_scale_factor * E)
         if within < self.cfg.pulse_len:
-            scale = 1.0 + self.cfg.E_scale_factor * self.E
-            scale = float(scale)
-            I[self.regime_nodes[r]] = self.regime_amp[r] * scale
+            I[self.regime_nodes[r]] = self.regime_amp[r] * amp_scale
 
-        # Continuous bias + noise (with autotuned noise_scale)
         global_wave = np.sin(self.global_freq * t)
         I += global_wave * 0.15
-        noise = (
-            self.cfg.noise_std
-            * self.noise_scale
-            * self.rng.standard_normal(self.N)
-        )
-        I += noise.astype(substrate.cfg.dtype)
+        I += noise_std * self.rng.standard_normal(self.N)
 
-        # --- End-of-slot slow updates ---
-        if within == self.cfg.period - 1:
-            self._on_slot_end(slot, substrate)
+        # logs
+        self.E_hist.append(self.E)
+        self.T_hist.append(self.T)
+        self.regime_hist.append(int(r))
+        self.readout_hist.append(readout)
+        self.noise_hist.append(noise_std)
+        self.amp_scale_hist.append(amp_scale)
 
         return I.astype(substrate.cfg.dtype)
 
-    def _on_slot_end(self, slot: int, substrate: Substrate) -> None:
-        """
-        Called at the end of each slot. This is where we:
 
-          - Record a hash fingerprint of V.
-          - Estimate novelty, and occasionally update noise_scale.
-          - Occasionally apply environment homeostasis.
-          - Log the current slow-control variables for analysis.
-        """
-        self.slot_index = slot + 1
+# -----------------------------
+# Report writer (Markview/MD)
+# -----------------------------
 
-        # --- Hash-based novelty ---
-        h = self._hash_V(substrate.V)
-        self.hash_window.append(h)
-        if len(self.hash_window) > self.auto.max_hash_window:
-            # Keep the window bounded
-            self.hash_window = self.hash_window[-self.auto.max_hash_window :]
+def write_report_md(
+    path_md: str,
+    run_id: str,
+    git_commit: str,
+    cfg_sub: SubstrateConfig,
+    cfg_pl: PlasticityConfig,
+    cfg_env: AutoTuneEnvConfig,
+    summary: Dict[str, Any],
+) -> None:
+    os.makedirs(os.path.dirname(path_md), exist_ok=True)
 
-        novelty_rate = self._compute_novelty()
-        self.novelty_hist.append(novelty_rate)
+    def f(x: float) -> str:
+        return f"{x:.6g}"
 
-        # Update noise_scale occasionally
-        if self.slot_index % self.auto.novelty_update_interval == 0:
-            self._apply_novelty_balance(novelty_rate)
+    lines: List[str] = []
+    lines.append(f"# exp_autotune_phenotype — run {run_id}")
+    lines.append("")
+    lines.append("## Run metadata")
+    lines.append(f"- **run_id:** `{run_id}`")
+    lines.append(f"- **git_commit:** `{git_commit}`")
+    lines.append(f"- **npz:** `{summary['npz_path']}`")
+    lines.append("")
 
-        # Apply homeostasis occasionally
-        if self.slot_index % self.auto.homeo_interval_slots == 0:
-            self._apply_homeostasis()
+    lines.append("## Key results (high level)")
+    lines.append(f"- **total_steps:** `{summary['total_steps']}`")
+    lines.append(f"- **samples:** `{summary['num_samples']}`")
+    lines.append(f"- **clusters_seen:** `{summary['clusters_seen']}`")
+    lines.append(f"- **core_threshold (window):** `{summary['core_threshold']}`")
+    lines.append(f"- **final core_coverage (window):** `{f(summary['final_core_coverage'])}`")
+    lines.append(f"- **final novelty_rate (window):** `{f(summary['final_novelty_rate'])}`")
+    lines.append(f"- **E_final:** `{f(summary['E_final'])}`")
+    lines.append(f"- **T_final:** `{f(summary['T_final'])}`")
+    lines.append("")
 
-        # Log slow-control variables (once per slot)
-        self.E_drive_hist.append(self.E_drive)
-        self.feedback_gain_hist.append(self.feedback_gain)
-        self.noise_scale_hist.append(self.noise_scale)
+    lines.append("## Interpretation (plain language)")
+    lines.append(
+        "This run uses a closed-loop environment with a self-tuning thermostat. "
+        "The thermostat continuously adjusts exploration pressure (noise and excitation) "
+        "to push the system toward a target re-use rate (core coverage) rather than unbounded novelty. "
+        "If core coverage is too low (too many one-off attractors), exploration is reduced. "
+        "If core coverage is too high (too repetitive), exploration is increased."
+    )
+    lines.append("")
+
+    lines.append("## Parameters")
+    lines.append("### Substrate")
+    lines.append(f"- N: `{cfg_sub.N}`")
+    lines.append(f"- C: `{cfg_sub.C}`")
+    lines.append(f"- lam: `{cfg_sub.lam}`")
+    lines.append(f"- dt: `{cfg_sub.dt}`")
+    lines.append(f"- init_v_std: `{cfg_sub.init_v_std}`")
+    lines.append(f"- init_g_scale: `{cfg_sub.init_g_scale}`")
+    lines.append(f"- symmetric_g: `{cfg_sub.symmetric_g}`")
+    lines.append("")
+    lines.append("### Plasticity")
+    lines.append(f"- eta: `{cfg_pl.eta}`")
+    lines.append(f"- alpha: `{cfg_pl.alpha}`")
+    lines.append(f"- use_fitness_gate: `{cfg_pl.use_fitness_gate}`")
+    lines.append(f"- enable_create_prune: `{cfg_pl.enable_create_prune}`")
+    lines.append("")
+    lines.append("### Environment + thermostat")
+    lines.append(f"- regimes: `{cfg_env.regimes}`; nodes_per_regime: `{cfg_env.nodes_per_regime}`")
+    lines.append(f"- base_amp: `{cfg_env.base_amp}`; noise_std: `{cfg_env.noise_std}`")
+    lines.append(f"- E_leak: `{cfg_env.E_leak}`; E_drive: `{cfg_env.E_drive}`; E_clip: `{cfg_env.E_clip}`")
+    lines.append(f"- feedback_gain: `{cfg_env.feedback_gain}`; feedback_mode: `{cfg_env.feedback_mode}`")
+    lines.append(f"- E_scale_factor: `{cfg_env.E_scale_factor}`; soft_saturate_E: `{cfg_env.soft_saturate_E}`")
+    lines.append(f"- target_coverage: `{cfg_env.target_coverage}`; tune_every_slots: `{cfg_env.tune_every_slots}`")
+    lines.append(f"- T_init: `{cfg_env.T_init}`; T_min: `{cfg_env.T_min}`; T_max: `{cfg_env.T_max}`; T_k: `{cfg_env.T_k}`")
+    lines.append(f"- T_affects_noise: `{cfg_env.T_affects_noise}`; T_affects_amp: `{cfg_env.T_affects_amp}`")
+    lines.append("")
+
+    lines.append("## Probes recorded")
+    lines.append("- `E_hist(t)`: environment scalar")
+    lines.append("- `T_hist(t)`: thermostat scalar")
+    lines.append("- `core_coverage_hist`: sliding-window reuse rate")
+    lines.append("- `novelty_rate_hist`: sliding-window uniqueness rate")
+    lines.append("- `sample_times`, `attractor_id`, `cluster_sizes`: online alphabet probe outputs")
+    lines.append("")
+
+    with open(path_md, "w", encoding="utf-8") as fmd:
+        fmd.write("\n".join(lines) + "\n")
 
 
-# ---------------------------------------------------------------------
-# Main experiment
-# ---------------------------------------------------------------------
+# -----------------------------
+# Main
+# -----------------------------
 
+def main():
+    # --- run id / stamp ---
+    run_id = time.strftime("%Y%m%d_%H%M%S")
 
-def main() -> None:
-    # -------------------------
-    # Configs
-    # -------------------------
+    # --- configs ---
     substrate_cfg = SubstrateConfig(
         N=220,
         C=1.0,
@@ -456,11 +467,11 @@ def main() -> None:
         dt=substrate_cfg.dt,
         use_fitness_gate=True,
         symmetric_g=substrate_cfg.symmetric_g,
-        enable_create_prune=False,  # we let environment self-tune first
+        enable_create_prune=False,
         seed=0,
     )
 
-    env_cfg = ClosedLoopEnvConfig(
+    env_cfg = AutoTuneEnvConfig(
         period=260,
         pulse_len=35,
         relax_len=110,
@@ -469,131 +480,214 @@ def main() -> None:
         base_amp=0.8,
         noise_std=0.18,
         E_init=0.0,
-        E_leak=0.0095,      # fairly strong pull toward baseline
-        E_drive=0.004,      # initial drive, will be autotuned
+        E_leak=0.008,
+        E_drive=0.004,
         E_clip=2.0,
-        feedback_gain=0.03, # initial gain, will be autotuned
+        feedback_gain=0.03,
         feedback_mode="energy",
         E_scale_factor=0.35,
+        T_init=1.0,
+        T_min=0.25,
+        T_max=3.0,
+        T_k=0.8,
+        target_coverage=0.40,
+        tune_every_slots=20,
+        T_affects_noise=True,
+        T_affects_amp=True,
+        soft_saturate_E=True,
     )
 
-    auto_cfg = AutoTuneConfig(
-        # E band parameters tuned for E_clip = 2.0
-        E_target=0.6,  # target around 1.2
-        homeo_window_slots=64,
-        homeo_interval_slots=16,
-        homeo_lr_drive=0.005,
-        homeo_lr_feedback=0.001,
-        E_drive_min=0.0,
-        E_drive_max=0.02,
-        feedback_min=0.0,
-        feedback_max=0.08,
-        novelty_window_slots=256,
-        novelty_update_interval=32,
-        novelty_target=0.5,
-        novelty_lr_noise=0.3,
-        noise_scale_min=0.2,
-        noise_scale_max=3.0,
-        hash_dim=16,
-        max_hash_window=512,
-    )
+    slot_cfg = SlotConfig(pulse_len=env_cfg.pulse_len, relax_len=env_cfg.relax_len)
+    env = AutoTuneEnvironment(substrate_cfg.N, env_cfg, seed=7)
 
-    slot_cfg = SlotConfig(
-        pulse_len=env_cfg.pulse_len,
-        relax_len=env_cfg.relax_len,
-    )
-
-    env = AutoTuningEnvironment(
-        N=substrate_cfg.N,
-        env_cfg=env_cfg,
-        auto_cfg=auto_cfg,
-        seed=11,
-    )
-
-    # Long-run config: you can increase this further as needed.
+    # Long but not insane by default; you can push to weeks by raising total_steps.
     run_cfg = RunConfig(
-        total_steps=1_000_000,   # ~1e6 steps; feel free to scale up
+        total_steps=400_000,
         slot_period=env_cfg.period,
         record_V=True,
         record_dV=False,
         record_metrics=True,
     )
 
-    # -------------------------
-    # Run simulation
-    # -------------------------
+    # --- probe config ---
+    cluster_cfg = OnlineClusterConfig(threshold=0.995, max_reps=20000)
+    clusterer = OnlineCosineCluster(cluster_cfg, dim=substrate_cfg.N, dtype=np.float32)
+
+    window_probe = SlidingCoverageProbe(window=600, core_threshold=10)
+
+    # Sample once per slot at slot_cfg.sample_index(t0)
+    period = env_cfg.period
+    slots_total = run_cfg.total_steps // period
+    skip_slots = 12
+
+    sample_times: List[int] = []
+    attractor_ids: List[int] = []
+    core_coverage_hist: List[float] = []
+    novelty_rate_hist: List[float] = []
+    T_updates: List[Tuple[int, float, float]] = []  # (slot, coverage, T)
+
+    # Optional triggered snapshots (small) using interesting events
+    snap_paths: List[str] = []
+    snap_every_slots = 500  # periodic safety snapshot (small)
+    snap_on_coverage_cross = 0.30
+    last_crossed = False
+
+    # --- run simulation ---
     out = run_simulation(
         substrate_cfg=substrate_cfg,
         plasticity_cfg=plasticity_cfg,
         run_cfg=run_cfg,
         env_fn=env.env_fn,
         slot_cfg=slot_cfg,
-        true_token_fn=None,  # unsupervised / self-tuned
+        true_token_fn=None,
         seed=0,
     )
 
-    fitness_hist = out.get("fitness_hist", None)
+    # We sample from recorded V_hist (simple & consistent with your current codebase).
+    V_hist = out["V_hist"]
 
-    # -------------------------
-    # Print quick summary
-    # -------------------------
-    E_hist = np.array(env.E_hist, dtype=np.float32)
-    novelty_hist = np.array(env.novelty_hist, dtype=np.float32)
+    for slot in range(skip_slots, slots_total):
+        t0 = slot * period
+        ts = slot_cfg.sample_index(t0)
+        if ts >= run_cfg.total_steps:
+            break
 
-    print("\nPhase 7 results (Autotuned phenotype loop)")
-    print("------------------------------------------")
-    print(f"total_steps     : {run_cfg.total_steps}")
-    print(f"E_hist length   : {len(E_hist)}")
-    if len(E_hist) > 0:
-        print(
-            f"E_min / E_max   : {E_hist.min():.3f} / {E_hist.max():.3f} "
-            f"(target ~ {auto_cfg.E_target * env_cfg.E_clip:.3f})"
-        )
-        print(f"E_final         : {E_hist[-1]:.3f}")
-    if fitness_hist is not None and len(fitness_hist) > 0:
-        F = np.asarray(fitness_hist, dtype=np.float32)
-        print("\nFitness F(t):")
-        print(
-            f"  length        : {len(F)}\n"
-            f"  F_min / F_max : {F.min():.4f} / {F.max():.4f}\n"
-            f"  F_mean / F_sd : {F.mean():.4f} / {F.std():.4f}"
-        )
-    if len(novelty_hist) > 0:
-        print(
-            f"\nNovelty rate (window-unique / window-size):"
-            f"\n  mean          : {novelty_hist.mean():.3f}"
-            f"\n  min / max     : {novelty_hist.min():.3f} / {novelty_hist.max():.3f}"
-            f"\n  target        : {auto_cfg.novelty_target:.3f}"
-        )
+        v = V_hist[ts].astype(np.float32, copy=False)
+        cid = clusterer.assign(v)
 
-    # -------------------------
-    # Save NPZ
-    # -------------------------
+        sample_times.append(int(ts))
+        attractor_ids.append(int(cid))
+
+        window_probe.update(cid)
+        cov = window_probe.coverage()
+        nov = window_probe.novelty_rate()
+        core_coverage_hist.append(float(cov))
+        novelty_rate_hist.append(float(nov))
+
+        # thermostat tune
+        if (slot % env_cfg.tune_every_slots) == 0:
+            env.tune_thermostat(cov)
+            T_updates.append((int(slot), float(cov), float(env.T)))
+
+        # periodic tiny snapshot (ids + probes only)
+        if (slot % snap_every_slots) == 0 and slot > 0:
+            os.makedirs("runs", exist_ok=True)
+            sp = f"runs/exp_autotune_phenotype_snap_{run_id}_k{slot:06d}.npz"
+            savez_safe(sp, {
+                "run_id": np.array(run_id, dtype="U32"),
+                "slot": np.array(slot, dtype=np.int32),
+                "sample_times": np.array(sample_times, dtype=np.int32),
+                "attractor_id": np.array(attractor_ids, dtype=np.int32),
+                "cluster_sizes": clusterer.counts.astype(np.int32),
+                "core_coverage_hist": np.array(core_coverage_hist, dtype=np.float32),
+                "novelty_rate_hist": np.array(novelty_rate_hist, dtype=np.float32),
+                "E_tail": np.array(env.E_hist[-5000:], dtype=np.float32),
+                "T_tail": np.array(env.T_hist[-5000:], dtype=np.float32),
+            })
+            snap_paths.append(sp)
+
+        # trigger snapshot on coverage crossing
+        crossed = (cov >= snap_on_coverage_cross)
+        if crossed and (not last_crossed):
+            os.makedirs("runs", exist_ok=True)
+            sp = f"runs/exp_autotune_phenotype_snap_{run_id}_CROSS_{slot:06d}.npz"
+            savez_safe(sp, {
+                "run_id": np.array(run_id, dtype="U32"),
+                "slot": np.array(slot, dtype=np.int32),
+                "sample_times": np.array(sample_times, dtype=np.int32),
+                "attractor_id": np.array(attractor_ids, dtype=np.int32),
+                "cluster_sizes": clusterer.counts.astype(np.int32),
+                "core_coverage_hist": np.array(core_coverage_hist, dtype=np.float32),
+                "novelty_rate_hist": np.array(novelty_rate_hist, dtype=np.float32),
+                "E_tail": np.array(env.E_hist[-20000:], dtype=np.float32),
+                "T_tail": np.array(env.T_hist[-20000:], dtype=np.float32),
+            })
+            snap_paths.append(sp)
+            last_crossed = True
+        if not crossed:
+            last_crossed = False
+
+    # --- save main NPZ ---
     os.makedirs("runs", exist_ok=True)
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    path = f"runs/exp_autotune_phenotype_{stamp}.npz"
+    npz_path = f"runs/exp_autotune_phenotype_fixed_{run_id}.npz"
 
-    payload: Dict[str, Any] = dict(out)
-
+    payload = dict(out)
     payload.update(
-        E_hist=E_hist,
+        # probe outputs
+        sample_times=np.array(sample_times, dtype=np.int32),
+        attractor_id=np.array(attractor_ids, dtype=np.int32),
+        cluster_sizes=clusterer.counts.astype(np.int32),
+        core_coverage_hist=np.array(core_coverage_hist, dtype=np.float32),
+        novelty_rate_hist=np.array(novelty_rate_hist, dtype=np.float32),
+        T_updates=np.array(T_updates, dtype=np.float32),  # columns: slot,cov,T
+
+        # environment logs
+        E_hist=np.array(env.E_hist, dtype=np.float32),
+        T_hist=np.array(env.T_hist, dtype=np.float32),
         regime_hist=np.array(env.regime_hist, dtype=np.int32),
-        substrate_readout_hist=np.array(
-            env.readout_hist, dtype=np.float32
-        ),
-        E_drive_hist=np.array(env.E_drive_hist, dtype=np.float32),
-        feedback_gain_hist=np.array(
-            env.feedback_gain_hist, dtype=np.float32
-        ),
-        noise_scale_hist=np.array(
-            env.noise_scale_hist, dtype=np.float32
-        ),
-        novelty_hist=novelty_hist,
-        autotune_config=str(auto_cfg),
-        env_config=str(env_cfg),
+        substrate_readout_hist=np.array(env.readout_hist, dtype=np.float32),
+        noise_hist=np.array(env.noise_hist, dtype=np.float32),
+        amp_scale_hist=np.array(env.amp_scale_hist, dtype=np.float32),
+
+        # run_id + snapshots list
+        run_id=np.array(run_id, dtype="U32"),
+        snapshot_paths=np.array(snap_paths, dtype="U256"),
     )
 
-    savez_safe(path, payload)
+    savez_safe(npz_path, payload)
+
+    # --- make report md ---
+    git_commit = os.popen("git rev-parse --short HEAD").read().strip() or "unknown"
+    report_path = f"runs/reports/exp_autotune_phenotype_{run_id}.md"
+
+    final_cov = float(core_coverage_hist[-1]) if core_coverage_hist else 0.0
+    final_nov = float(novelty_rate_hist[-1]) if novelty_rate_hist else 1.0
+
+    summary = dict(
+        npz_path=npz_path,
+        total_steps=int(run_cfg.total_steps),
+        num_samples=len(sample_times),
+        clusters_seen=int(len(clusterer.counts)),
+        core_threshold=int(window_probe.core_threshold),
+        final_core_coverage=final_cov,
+        final_novelty_rate=final_nov,
+        E_final=float(env.E_hist[-1]) if env.E_hist else float("nan"),
+        T_final=float(env.T_hist[-1]) if env.T_hist else float("nan"),
+    )
+
+    write_report_md(
+        path_md=report_path,
+        run_id=run_id,
+        git_commit=git_commit,
+        cfg_sub=substrate_cfg,
+        cfg_pl=plasticity_cfg,
+        cfg_env=env_cfg,
+        summary=summary,
+    )
+
+    # --- print short console summary (ends up in your log file) ---
+    print("\nexp_autotune_phenotype results")
+    print("------------------------------")
+    print(f"run_id: {run_id}")
+    print(f"samples: {summary['num_samples']}")
+    print(f"clusters_seen: {summary['clusters_seen']}")
+    print(f"final core_coverage(window): {summary['final_core_coverage']:.3f}")
+    print(f"final novelty_rate(window): {summary['final_novelty_rate']:.3f}")
+    print(f"E_final: {summary['E_final']:.3f}")
+    print(f"T_final: {summary['T_final']:.3f}")
+    print(f"Saved NPZ: {npz_path}")
+    print(f"Saved report: {report_path}")
+    if snap_paths:
+        print(f"Snapshots: {len(snap_paths)} (first: {snap_paths[0]})")
+    print("")
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
     print(f"\nSaved: {path}\n")
 
 
