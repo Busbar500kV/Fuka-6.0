@@ -112,15 +112,19 @@ def summarize_fitness(fitness_hist: Optional[np.ndarray]) -> None:
     print(f"F_last  5       : {np.array2string(F[-5:], precision=4)}")
 
 
-def summarize_environment(E_hist: Optional[np.ndarray]) -> None:
-    if E_hist is None:
-        print("\n--- Environment E(t) ---")
-        print("E_hist: (missing)")
+def summarize_environment(E: np.ndarray | None) -> None:
+    print("\n--- Environment E(t) ---")
+    if E is None:
+        print("E_hist          : (missing)")
         return
 
-    E = _as_1d(E_hist).astype(np.float64)
-    print("\n--- Environment E(t) ---")
+    E = np.asarray(E)
+
     print(f"E_hist length   : {len(E)}")
+    if E.size == 0:
+        print("E_hist          : (empty) — this run did not record environment history")
+        return
+
     print(f"E_min / E_max   : {E.min():.3f} / {E.max():.3f}")
     print(f"E_final         : {E[-1]:.3f}")
 
