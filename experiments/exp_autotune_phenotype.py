@@ -1,28 +1,10 @@
-"""
-Fuka-6.0 Experiment: exp_autotune_phenotype
-Autotune closed-loop environment from chaos (no manual hyperparameter tuning).
-
-Key idea:
-  We keep a scalar environment state E(t) in a "healthy" band by automatically
-  adjusting environment knobs (feedback_gain, E_leak, noise_std, etc.) while the
-  substrate evolves.
-
-What gets saved (pickle-free .npz):
-  - core outputs from run_simulation (V_hist, fitness_hist, g_last, etc.)
-  - E_hist, readout_hist
-  - attractor samples and cluster ids (optional / lightweight)
-
-This file intentionally avoids:
-  - analysis.plots (sklearn dependency)
-  - any object arrays (pickle risk)
-"""
-
+# experiments/exp_autotune_phenotype.py
 from __future__ import annotations
 
 import os
 import time
 from dataclasses import dataclass
-from typing import Dict, Any, List, Tuple, Optional
+from typing import List, Tuple, Dict, Any
 
 import numpy as np
 
@@ -32,44 +14,63 @@ from core.metrics import SlotConfig
 from core.run import RunConfig, run_simulation
 
 from analysis.cluster import CosineClusterConfig, cluster_cosine_incremental
+from analysis.decode import build_unsupervised_labels, decode_sequence
 
 
 # -----------------------------
-# Safe saving (no pickle)
+# Safe NPZ saving (no pickles)
 # -----------------------------
+def _to_safe_np(value: Any) -> Any:
+    """Convert common Python containers to safe numpy arrays (no object dtype)."""
+    if value is None:
+        return None
+
+    if isinstance(value, np.ndarray):
+        if value.dtype == object:
+            raise TypeError("Refusing to save object-dtype arrays (pickle risk).")
+        return value
+
+    if isinstance(value, (float, int, bool, np.floating, np.integer, np.bool_)):
+        return np.array(value)
+
+    if isinstance(value, str):
+        return np.array(value, dtype="U")
+
+    if isinstance(value, (list, tuple)):
+        # Try numeric
+        try:
+            arr = np.array(value)
+            if arr.dtype == object:
+                # maybe list of arrays -> stack
+                if len(value) > 0 and all(isinstance(x, np.ndarray) for x in value):
+                    arr2 = np.stack([x.astype(np.float32) for x in value], axis=0)
+                    return arr2
+                raise TypeError("List produced object dtype; convert explicitly.")
+            return arr
+        except Exception as e:
+            raise TypeError(f"Cannot safely convert list/tuple for NPZ: {e}")
+
+    if isinstance(value, dict):
+        raise TypeError("Nested dicts not allowed in NPZ payload (flatten first).")
+
+    raise TypeError(f"Unsupported type for safe NPZ saving: {type(value)}")
+
 
 def savez_safe(path: str, payload: Dict[str, Any]) -> None:
-    """
-    Save a dict to npz in a pickle-free way.
-    - Converts lists to numpy arrays when possible
-    - Rejects object dtype arrays
-    """
-    clean: Dict[str, Any] = {}
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    safe: Dict[str, Any] = {}
     for k, v in payload.items():
         if v is None:
             continue
-
-        if isinstance(v, (list, tuple)):
-            v = np.array(v)
-
-        if isinstance(v, np.ndarray) and v.dtype == object:
-            raise ValueError(f"Refusing to save object array (pickle risk): key={k}")
-
-        clean[k] = v
-
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    np.savez_compressed(path, **clean)
-
-    # hard check: ensure load works with allow_pickle=False
-    np.load(path, allow_pickle=False)
+        safe[k] = _to_safe_np(v)
+    np.savez_compressed(path, **safe)
 
 
-# -----------------------------
-# Closed-loop environment
-# -----------------------------
-
+# ---------------------------------------------------------------------
+# Closed-loop environment (self-contained; no sklearn dependencies)
+# ---------------------------------------------------------------------
 @dataclass
-class AutoTuneEnvConfig:
+class ClosedLoopEnvConfig:
     period: int = 260
     pulse_len: int = 35
     relax_len: int = 110
@@ -78,28 +79,24 @@ class AutoTuneEnvConfig:
     nodes_per_regime: int = 9
 
     base_amp: float = 0.8
-    noise_std: float = 0.25
+    noise_std: float = 0.18
 
-    # scalar env state
+    # scalar environment dynamics
     E_init: float = 0.0
-    E_clip: float = 2.0
-
-    # scalar env dynamics
     E_leak: float = 0.008
     E_drive: float = 0.004
-    feedback_gain: float = 0.03
-    feedback_mode: str = "energy"     # "energy" or "sign"
+    E_clip: float = 2.0
 
-    # how E scales excitation (gentler than 1+E)
-    E_scale_factor: float = 0.35
+    # substrate -> environment coupling
+    feedback_gain: float = 0.0020
+    feedback_mode: str = "energy"  # "energy" or "sign"
 
-    # extra chaos knobs
-    permeability_jitter: float = 0.02   # slow modulation magnitude
-    permeability_period: int = 5000     # steps
+    # injection scaling vs E
+    E_scale_factor: float = 0.35   # scale = 1 + E_scale_factor * E
 
 
-class AutoTuneClosedLoopEnvironment:
-    def __init__(self, N: int, cfg: AutoTuneEnvConfig, seed: int = 5):
+class ClosedLoopEnvironment:
+    def __init__(self, N: int, cfg: ClosedLoopEnvConfig, seed: int = 5):
         self.N = N
         self.cfg = cfg
         self.rng = np.random.default_rng(seed)
@@ -114,15 +111,17 @@ class AutoTuneClosedLoopEnvironment:
 
         self.global_freq = 2 * np.pi / (cfg.period * 6.0)
 
-        # scalar environment state
         self.E = float(cfg.E_init)
 
         # logs
         self.E_hist: List[float] = []
         self.regime_hist: List[int] = []
         self.readout_hist: List[float] = []
-        self.noise_hist: List[float] = []
-        self.perm_hist: List[float] = []
+
+    def reset_logs(self) -> None:
+        self.E_hist = []
+        self.regime_hist = []
+        self.readout_hist = []
 
     def regime_at_slot(self, slot: int) -> int:
         return (slot // self.regime_period_slots) % self.R
@@ -136,16 +135,9 @@ class AutoTuneClosedLoopEnvironment:
         raise ValueError(f"Unknown feedback_mode {self.cfg.feedback_mode}")
 
     def update_environment(self, readout: float) -> None:
-        # squash to avoid runaway
         phi = np.tanh(readout)
-
-        dE = (
-            -self.cfg.E_leak * self.E
-            + self.cfg.E_drive
-            + self.cfg.feedback_gain * phi
-        )
-        self.E += dE
-        self.E = float(np.clip(self.E, -self.cfg.E_clip, self.cfg.E_clip))
+        dE = (-self.cfg.E_leak * self.E) + self.cfg.E_drive + (self.cfg.feedback_gain * phi)
+        self.E = float(np.clip(self.E + dE, -self.cfg.E_clip, self.cfg.E_clip))
 
     def env_fn(self, t: int, substrate: Substrate) -> np.ndarray:
         slot = t // self.cfg.period
@@ -154,71 +146,65 @@ class AutoTuneClosedLoopEnvironment:
         readout = self.substrate_readout(substrate)
         self.update_environment(readout)
 
-        # slow “permeability” modulation (external chaos)
-        perm = 1.0 + self.cfg.permeability_jitter * np.sin(2 * np.pi * t / self.cfg.permeability_period)
-
         self.E_hist.append(self.E)
         self.regime_hist.append(r)
         self.readout_hist.append(readout)
-        self.noise_hist.append(self.cfg.noise_std)
-        self.perm_hist.append(float(perm))
 
         within = t % self.cfg.period
         I = np.zeros(self.N, dtype=substrate.cfg.dtype)
 
-        # gentler excitation scaling with E
         scale = 1.0 + self.cfg.E_scale_factor * self.E
-        scale = float(np.clip(scale, 0.10, 3.0))
 
         if within < self.cfg.pulse_len:
-            I[self.regime_nodes[r]] = (self.regime_amp[r] * scale) * perm
+            I[self.regime_nodes[r]] = (self.regime_amp[r] * scale)
 
         global_wave = np.sin(self.global_freq * t)
         I += global_wave * 0.15
-
-        # noise (also impacted by permeability)
-        I += (self.cfg.noise_std * perm) * self.rng.standard_normal(self.N)
+        I += self.cfg.noise_std * self.rng.standard_normal(self.N)
 
         return I.astype(substrate.cfg.dtype)
 
 
-# -----------------------------
-# Autotune controller
-# -----------------------------
-
+# ---------------------------------------------------------------------
+# Autotune loop
+# ---------------------------------------------------------------------
 @dataclass
-class AutoTuneConfig:
-    target_E: float = 0.50
-    band: float = 0.12  # acceptable band around target
-    kp: float = 0.030   # proportional gain
-    ki: float = 0.0006  # integral gain
+class AutotuneConfig:
+    epochs: int = 14
+    steps_per_epoch: int = 52000
 
-    # which knob to tune primarily
-    tune_knob: str = "feedback_gain"  # or "E_leak" or "noise_std"
+    # Target for mean(E) over an epoch (steady-ish)
+    target_E_mean: float = 0.50
+    band: float = 0.12
 
-    # bounds for knobs
-    feedback_gain_min: float = 0.002
-    feedback_gain_max: float = 0.080
-    E_leak_min: float = 0.002
-    E_leak_max: float = 0.030
+    # Control step sizes
+    gain_step: float = 1.25      # multiplicative for feedback_gain
+    leak_step: float = 1.15      # multiplicative for E_leak
+    noise_step: float = 1.10     # multiplicative for noise_std
+
+    # Bounds
+    feedback_gain_min: float = 0.0003
+    feedback_gain_max: float = 0.05
+    E_leak_min: float = 0.001
+    E_leak_max: float = 0.05
     noise_min: float = 0.05
     noise_max: float = 0.60
 
-    # chunking
-    epochs: int = 14
-    steps_per_epoch: int = 52000  # ~200 slots at period=260
+    # Sampling / clustering
+    cosine_threshold: float = 0.995
+    skip_slots: int = 12
 
 
 def clamp(x: float, lo: float, hi: float) -> float:
-    return float(min(max(x, lo), hi))
+    return float(max(lo, min(hi, x)))
 
 
 def main():
     # -------------------------
-    # configs
+    # Base configs
     # -------------------------
     substrate_cfg = SubstrateConfig(
-        N=220,
+        N=200,
         C=1.0,
         lam=0.03,
         dt=0.05,
@@ -238,53 +224,28 @@ def main():
         seed=0,
     )
 
-    env_cfg = AutoTuneEnvConfig(
-        period=260,
-        pulse_len=35,
-        relax_len=110,
-        regimes=3,
-        nodes_per_regime=9,
-        base_amp=0.8,
-        noise_std=0.25,
-        E_init=0.0,
-        E_clip=2.0,
-        E_leak=0.008,
-        E_drive=0.004,
-        feedback_gain=0.03,
-        feedback_mode="energy",
-        E_scale_factor=0.35,
-        permeability_jitter=0.02,
-        permeability_period=5000,
-    )
-
-    tune_cfg = AutoTuneConfig(
-        target_E=0.50,
-        band=0.12,
-        kp=0.030,
-        ki=0.0006,
-        tune_knob="feedback_gain",
-        epochs=14,
-        steps_per_epoch=52000,
-    )
-
+    env_cfg = ClosedLoopEnvConfig()
     slot_cfg = SlotConfig(pulse_len=env_cfg.pulse_len, relax_len=env_cfg.relax_len)
 
-    # -------------------------
-    # autotune loop
-    # -------------------------
-    I_int = 0.0  # integral state
-    epoch_reports: List[str] = []
-    all_out: Optional[Dict[str, Any]] = None
+    tune = AutotuneConfig()
 
-    t0_global = time.time()
+    # -------------------------
+    # Autotune epochs
+    # -------------------------
+    start = time.time()
 
-    for epoch in range(tune_cfg.epochs):
-        env = AutoTuneClosedLoopEnvironment(substrate_cfg.N, env_cfg, seed=5 + epoch)
+    final_out = None
+    final_env = None
+
+    for epoch in range(tune.epochs):
+        env = ClosedLoopEnvironment(substrate_cfg.N, env_cfg, seed=5)
+        env.reset_logs()
 
         run_cfg = RunConfig(
-            total_steps=tune_cfg.steps_per_epoch,
+            total_steps=tune.steps_per_epoch,
             slot_period=env_cfg.period,
             record_V=True,
+            record_dV=False,
             record_metrics=True,
         )
 
@@ -295,124 +256,125 @@ def main():
             env_fn=env.env_fn,
             slot_cfg=slot_cfg,
             true_token_fn=None,
-            seed=epoch,
+            seed=epoch,  # vary a bit across epochs
         )
 
-        all_out = out  # keep last out for saving
-
         E_arr = np.array(env.E_hist, dtype=np.float32)
-        tail = E_arr[-min(len(E_arr), 20000):]
-        E_mean = float(tail.mean())
-        E_std = float(tail.std())
-        err = tune_cfg.target_E - E_mean
+        E_mean = float(E_arr.mean()) if E_arr.size else float("nan")
+        E_std = float(E_arr.std()) if E_arr.size else float("nan")
 
-        # PI update
-        I_int += err
-        u = tune_cfg.kp * err + tune_cfg.ki * I_int
+        err = E_mean - tune.target_E_mean
+        in_band = (abs(err) <= tune.band)
 
-        # apply update to chosen knob
-        if tune_cfg.tune_knob == "feedback_gain":
-            env_cfg.feedback_gain = clamp(
-                env_cfg.feedback_gain + u,
-                tune_cfg.feedback_gain_min,
-                tune_cfg.feedback_gain_max,
-            )
-        elif tune_cfg.tune_knob == "E_leak":
-            # inverse direction: higher leak pulls E down
-            env_cfg.E_leak = clamp(
-                env_cfg.E_leak - u,
-                tune_cfg.E_leak_min,
-                tune_cfg.E_leak_max,
-            )
-        elif tune_cfg.tune_knob == "noise_std":
-            env_cfg.noise_std = clamp(
-                env_cfg.noise_std + 0.25 * abs(u),
-                tune_cfg.noise_min,
-                tune_cfg.noise_max,
-            )
-        else:
-            raise ValueError(f"Unknown tune_knob: {tune_cfg.tune_knob}")
-
-        in_band = (abs(err) <= tune_cfg.band)
-
-        line = (
+        print(
             f"epoch={epoch:02d}  E_mean={E_mean:.3f}  E_std={E_std:.3f}  "
             f"err={err:+.3f}  in_band={in_band}  "
             f"feedback_gain={env_cfg.feedback_gain:.4f}  E_leak={env_cfg.E_leak:.4f}  noise={env_cfg.noise_std:.3f}"
         )
-        print(line)
-        epoch_reports.append(line)
+
+        # Simple self-tuning rules:
+        # - If E too high => reduce feedback_gain, increase leak, optionally increase noise
+        # - If E too low  => increase feedback_gain, decrease leak, optionally decrease noise
+        if not in_band:
+            if err > 0:
+                env_cfg.feedback_gain = clamp(env_cfg.feedback_gain / tune.gain_step,
+                                              tune.feedback_gain_min, tune.feedback_gain_max)
+                env_cfg.E_leak = clamp(env_cfg.E_leak * tune.leak_step,
+                                       tune.E_leak_min, tune.E_leak_max)
+                env_cfg.noise_std = clamp(env_cfg.noise_std * tune.noise_step,
+                                          tune.noise_min, tune.noise_max)
+            else:
+                env_cfg.feedback_gain = clamp(env_cfg.feedback_gain * tune.gain_step,
+                                              tune.feedback_gain_min, tune.feedback_gain_max)
+                env_cfg.E_leak = clamp(env_cfg.E_leak / tune.leak_step,
+                                       tune.E_leak_min, tune.E_leak_max)
+                env_cfg.noise_std = clamp(env_cfg.noise_std / tune.noise_step,
+                                          tune.noise_min, tune.noise_max)
+
+        final_out = out
+        final_env = env
+
+    assert final_out is not None and final_env is not None
 
     # -------------------------
-    # lightweight alphabet sample on final epoch output
+    # Build samples for clustering (like Phase-6)
     # -------------------------
-    assert all_out is not None
-    V_hist = all_out["V_hist"]
+    V_hist = final_out["V_hist"]
     period = env_cfg.period
-    total_steps = V_hist.shape[0]
-    slots_total = total_steps // period
+    slots_total = V_hist.shape[0] // period
 
-    samples: List[np.ndarray] = []
     sample_times: List[int] = []
+    samples: List[np.ndarray] = []
+    regime_labels: List[int] = []
 
-    # sample 1 per slot (skip first 12)
-    for slot in range(12, slots_total):
+    for slot in range(tune.skip_slots, slots_total):
         t0 = slot * period
         ts = slot_cfg.sample_index(t0)
-        if ts < total_steps:
-            sample_times.append(int(ts))
-            samples.append(V_hist[ts].astype(np.float32))
+        if ts < V_hist.shape[0]:
+            sample_times.append(ts)
+            samples.append(V_hist[ts])
+            regime_labels.append(final_env.regime_at_slot(slot))
 
-    samples_arr = np.stack(samples, axis=0) if len(samples) else np.zeros((0, substrate_cfg.N), np.float32)
-    sample_times_arr = np.array(sample_times, dtype=np.int32)
+    sample_times_np = np.array(sample_times, dtype=np.int32)
+    samples_np = np.array(samples)
+    regime_labels_np = np.array(regime_labels, dtype=np.int32)
 
-    cl_cfg = CosineClusterConfig(threshold=0.995)
-    cluster_ids, reps, sizes = cluster_cosine_incremental(samples_arr, cl_cfg)
+    cl_cfg = CosineClusterConfig(threshold=tune.cosine_threshold)
+    cluster_ids, reps, sizes = cluster_cosine_incremental(samples_np, cl_cfg)
+
+    labels_map = build_unsupervised_labels(cluster_ids, prefix="T")
+    decoded = decode_sequence(cluster_ids, labels_map)
+
+    print("\nPhase Autotune results")
+    print("----------------------")
+    print(f"epochs        : {tune.epochs}")
+    print(f"steps/epoch   : {tune.steps_per_epoch}")
+    print(f"target        : {tune.target_E_mean:.3f}")
+    print(f"band          : ±{tune.band:.3f}")
+    print(f"final knobs   : feedback_gain={env_cfg.feedback_gain:.4f}  E_leak={env_cfg.E_leak:.4f}  noise_std={env_cfg.noise_std:.3f}")
+    print(f"samples       : {len(samples_np)}")
+    print(f"clusters_seen : {len(np.unique(cluster_ids))}")
 
     # -------------------------
-    # save
+    # Save NPZ (consistent keys)
     # -------------------------
     stamp = time.strftime("%Y%m%d_%H%M%S")
     path = f"runs/exp_autotune_phenotype_{stamp}.npz"
 
-    payload = dict(all_out)
+    E_hist = np.array(final_env.E_hist, dtype=np.float32)
+    regime_hist = np.array(final_env.regime_hist, dtype=np.int32)
+    readout_hist = np.array(final_env.readout_hist, dtype=np.float32)
+
+    payload = dict(final_out)
     payload.update(
-        # env logs are only from final epoch (still useful)
-        E_hist=np.array([], dtype=np.float32),  # placeholder (per-epoch env was local)
-        autotune_epoch_reports=np.array(epoch_reports, dtype="U256"),
-
-        sample_times=sample_times_arr,
-        attractor_samples=samples_arr,
-        attractor_id=cluster_ids.astype(np.int32),
-        cluster_reps=reps.astype(np.float32),
+        sample_times=sample_times_np,
+        attractor_samples=samples_np.astype(np.float32),
+        attractor_id=np.array(cluster_ids, dtype=np.int32),
+        cluster_reps=np.array(reps, dtype=np.float32),
         cluster_sizes=np.array(sizes, dtype=np.int32),
+        hidden_regime_labels=regime_labels_np.astype(np.int32),
+        unsupervised_token_samples=np.array(decoded, dtype="U16"),
 
-        # final tuned params
-        tuned_feedback_gain=np.float32(env_cfg.feedback_gain),
-        tuned_E_leak=np.float32(env_cfg.E_leak),
-        tuned_noise_std=np.float32(env_cfg.noise_std),
-        tuned_E_scale_factor=np.float32(env_cfg.E_scale_factor),
-        tuned_permeability_jitter=np.float32(env_cfg.permeability_jitter),
-        tuned_permeability_period=np.int32(env_cfg.permeability_period),
+        E_hist=E_hist,
+        regime_hist=regime_hist,
+        substrate_readout_hist=readout_hist,
 
-        target_E=np.float32(tune_cfg.target_E),
-        target_band=np.float32(tune_cfg.band),
+        # metadata (handy for docs)
+        autotune_epochs=np.array(tune.epochs, dtype=np.int32),
+        autotune_steps_per_epoch=np.array(tune.steps_per_epoch, dtype=np.int32),
+        autotune_target_E_mean=np.array(tune.target_E_mean, dtype=np.float32),
+        autotune_band=np.array(tune.band, dtype=np.float32),
+        final_feedback_gain=np.array(env_cfg.feedback_gain, dtype=np.float32),
+        final_E_leak=np.array(env_cfg.E_leak, dtype=np.float32),
+        final_noise_std=np.array(env_cfg.noise_std, dtype=np.float32),
+        cosine_threshold=np.array(tune.cosine_threshold, dtype=np.float32),
     )
 
     savez_safe(path, payload)
 
-    dt = time.time() - t0_global
-    print("\nPhase Autotune results")
-    print("----------------------")
-    print(f"epochs        : {tune_cfg.epochs}")
-    print(f"steps/epoch   : {tune_cfg.steps_per_epoch}")
-    print(f"target        : {tune_cfg.target_E:.3f}")
-    print(f"band          : ±{tune_cfg.band:.3f}")
-    print(f"final knobs   : feedback_gain={env_cfg.feedback_gain:.4f}  E_leak={env_cfg.E_leak:.4f}  noise_std={env_cfg.noise_std:.3f}")
-    print(f"samples       : {len(samples_arr)}")
-    print(f"clusters_seen : {len(reps)}")
-    print(f"Saved: {path}")
-    print(f"Runtime: {dt:.1f} s\n")
+    runtime = time.time() - start
+    print(f"\nSaved: {path}")
+    print(f"Runtime: {runtime:.1f} s\n")
 
 
 if __name__ == "__main__":
