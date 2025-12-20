@@ -195,96 +195,83 @@ def alphabet_stats(attractor_id: Optional[np.ndarray],
             print(f"  cluster {cid:>3d}  count = {mask.sum():>4d}   H = {H:.3f}")
 
 
-def transition_stats(attractor_id: Optional[np.ndarray],
-                     E_hist: Optional[np.ndarray],
-                     core_threshold: int,
-                     max_print: int = 10) -> None:
-    if attractor_id is None:
-        return
+def transition_stats(ids, E=None, core_threshold=10, max_print=10):
+    """
+    Computes transition stats on the attractor ID sequence.
+    If E is provided (same length as ids), also prints low/high-E band transitions.
+    If E is None or empty or wrong length, band-splitting is skipped safely.
+    """
+    import numpy as np
+    from collections import Counter, defaultdict
 
-    ids = _as_1d(attractor_id).astype(int)
-    if len(ids) < 2:
-        return
-
-    # Determine core clusters by frequency in ids
-    uniq, counts = np.unique(ids, return_counts=True)
-    core = set(uniq[counts >= core_threshold].tolist())
-
-    cur = ids[:-1]
-    nxt = ids[1:]
-
-    # global core->core transitions
-    trans_counts: Dict[Tuple[int, int], int] = {}
-    from_counts: Dict[int, int] = {}
-    for a, b in zip(cur, nxt):
-        if a in core and b in core:
-            trans_counts[(a, b)] = trans_counts.get((a, b), 0) + 1
-            from_counts[a] = from_counts.get(a, 0) + 1
-
-    if len(trans_counts) == 0:
+    ids = np.asarray(ids).astype(np.int64)
+    if ids.size < 2:
         print("\nTop core->core transitions (global):")
         print("  (none)")
-    else:
-        scored = []
-        for (a, b), c in trans_counts.items():
-            p = c / from_counts[a]
-            scored.append((p, c, a, b))
-        scored.sort(reverse=True, key=lambda t: (t[0], t[1]))
-        print("\nTop core->core transitions (global):")
-        for p, c, a, b in scored[:max_print]:
-            print(f"  P({a:>3d}->{b:>3d}) = {p:6.3f}   count = {c:>4d}")
-
-    # Split by environment band (if available)
-    if E_hist is None:
         return
 
-    E = _as_1d(E_hist).astype(np.float64)
+    # --- core set based on counts ---
+    counts = Counter(ids.tolist())
+    core = sorted([k for k, v in counts.items() if v >= core_threshold])
+    core_set = set(core)
 
-    # We need E at sample times; if E is recorded per step and attractor_id per sample,
-    # we approximate by using evenly-spaced mapping if lengths differ.
-    # Best case: E_hist length == total_steps and sample_times exists elsewhere,
-    # but here we only have E_hist and ids. So do robust mapping:
-    if len(E) == len(ids):
-        E_s = E
+    # --- global core->core bigrams ---
+    big = Counter()
+    out_counts = Counter()
+    for a, b in zip(ids[:-1], ids[1:]):
+        if a in core_set and b in core_set:
+            big[(a, b)] += 1
+            out_counts[a] += 1
+
+    print("\nTop core->core transitions (global):")
+    if not big:
+        print("  (none)")
     else:
-        # map sample index i -> E index round(i*(len(E)-1)/(len(ids)-1))
-        if len(ids) <= 1:
-            return
-        idx = np.round(np.linspace(0, len(E) - 1, num=len(ids))).astype(int)
-        E_s = E[idx]
+        for (a, b), c in big.most_common(max_print):
+            p = c / out_counts[a] if out_counts[a] else 0.0
+            print(f"  P({a:3d}->{b:3d}) = {p:6.3f}   count = {c:4d}")
 
-    med = float(np.median(E_s))
-    low_mask = E_s[:-1] < med
-    high_mask = ~low_mask
+    # --- optional environment band split ---
+    if E is None:
+        return
+
+    E = np.asarray(E)
+    if E.size == 0:
+        print("\nEnvironment split: (skipped) E_hist empty")
+        return
+
+    # We need one E per symbol sample. If lengths mismatch, skip.
+    if E.shape[0] != ids.shape[0]:
+        print(f"\nEnvironment split: (skipped) len(E)={E.shape[0]} != len(ids)={ids.shape[0]}")
+        return
+
+    med = float(np.median(E))
+    low_idx = np.where(E[:-1] < med)[0]
+    high_idx = np.where(E[:-1] >= med)[0]
+
+    def band_stats(sel_idx, name):
+        big_b = Counter()
+        out_b = Counter()
+        for i in sel_idx:
+            a = int(ids[i]); b = int(ids[i + 1])
+            if a in core_set and b in core_set:
+                big_b[(a, b)] += 1
+                out_b[a] += 1
+        print(f"\n{name} band: top core->core transitions (prob, count, i->j):")
+        if not big_b:
+            print("  (none)")
+            return
+        for (a, b), c in big_b.most_common(max_print):
+            p = c / out_b[a] if out_b[a] else 0.0
+            print(f"  P({a:3d}->{b:3d}) = {p:6.3f}   count = {c:4d}")
 
     print("\nEnvironment split:")
     print(f"  median E(sample) = {med:.3f}")
-    print(f"  low-E transitions   : {int(low_mask.sum())}")
-    print(f"  high-E transitions  : {int(high_mask.sum())}")
+    print(f"  low-E transitions   : {len(low_idx)}")
+    print(f"  high-E transitions  : {len(high_idx)}")
 
-    def _band(name: str, band_mask: np.ndarray) -> None:
-        band_counts: Dict[Tuple[int, int], int] = {}
-        band_from: Dict[int, int] = {}
-        for (a, b, m) in zip(cur, nxt, band_mask):
-            if not m:
-                continue
-            if a in core and b in core:
-                band_counts[(a, b)] = band_counts.get((a, b), 0) + 1
-                band_from[a] = band_from.get(a, 0) + 1
-        print(f"\n{name} band: top core->core transitions (prob, count, i->j):")
-        if not band_counts:
-            print("  (none)")
-            return
-        scored2 = []
-        for (a, b), c in band_counts.items():
-            p = c / band_from[a]
-            scored2.append((p, c, a, b))
-        scored2.sort(reverse=True, key=lambda t: (t[0], t[1]))
-        for p, c, a, b in scored2[:max_print]:
-            print(f"  P({a:>3d}->{b:>3d}) = {p:6.3f}   count = {c:>4d}")
-
-    _band("Low-E", low_mask)
-    _band("High-E", high_mask)
+    band_stats(low_idx, "Low-E")
+    band_stats(high_idx, "High-E")
 
 
 def ngram_stats(attractor_id: Optional[np.ndarray],
